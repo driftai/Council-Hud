@@ -82,7 +82,7 @@ if (fs.existsSync(AUTH_KEY_PATH)) {
 }
 
 const requireAuth = (req, res, next) => {
-    if (req.url === '/health' || req.url === '/' || req.url.includes('health')) return next();
+    if (req.url === '/health' || req.url === '/') return next();
     const clientKey = req.headers['x-nexus-key'];
     if (!clientKey || clientKey !== NEXUS_KEY) return res.status(401).json({ error: "UNAUTHORIZED" });
     next();
@@ -94,7 +94,7 @@ function getFileTree(dir, depth = 0) {
         const dirents = fs.readdirSync(dir, { withFileTypes: true });
         return dirents.map((dirent) => {
             const res = path.join(dir, dirent.name);
-            if (['node_modules', '.git', '.next', '.vs', 'dist', 'System Volume Information', '$RECYCLE.BIN'].includes(dirent.name)) return null;
+            if (['node_modules', '.git', '.next', '.vs', 'dist'].includes(dirent.name)) return null;
             if (dirent.isDirectory()) {
                 return { name: dirent.name, type: 'folder', path: res, children: getFileTree(res, depth + 1) };
             }
@@ -107,27 +107,29 @@ function getWindowsStats() {
     try {
         const ps = "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -Command";
         
-        // 1. CPU (Direct Load %)
-        try {
-            const cpuRaw = execSync(`${ps} "(Get-CimInstance Win32_Processor).LoadPercentage"`, { stdio: ['pipe', 'pipe', 'ignore'] }).toString().trim();
-            lastStats.cpu = parseInt(cpuRaw) || lastStats.cpu;
-        } catch(e) {}
+        // SINGLE CALL OPTIMIZATION: Pull all data in one pipe
+        const psCommand = `
+            $cpu = (Get-CimInstance Win32_Processor).LoadPercentage;
+            $mem = Get-CimInstance Win32_OperatingSystem | Select-Object TotalVisibleMemorySize, FreePhysicalMemory;
+            $uptime = [math]::Round(((Get-Date) - $mem.LastBootUpTime).TotalSeconds);
+            if (!$uptime) { $uptime = [math]::Round(((Get-Date) - (Get-CimInstance Win32_OperatingSystem).LastBootUpTime).TotalSeconds) };
+            $ram = [math]::Round((($mem.TotalVisibleMemorySize - $mem.FreePhysicalMemory) / $mem.TotalVisibleMemorySize) * 100);
+            
+            Write-Output "$cpu|$ram|$uptime"
+        `.replace(/\n/g, ' ').trim();
 
-        // 2. RAM (Live Committed %)
-        try {
-            const ramRaw = execSync(`${ps} "(Get-CimInstance Win32_PerfFormattedData_PerfOS_Memory).PercentCommittedBytesInUse"`, { stdio: ['pipe', 'pipe', 'ignore'] }).toString().trim();
-            lastStats.ram = parseInt(ramRaw) || lastStats.ram;
-        } catch(e) {}
+        const raw = execSync(`${ps} "${psCommand}"`, { stdio: ['pipe', 'pipe', 'ignore'] }).toString().trim();
+        const parts = raw.split('|');
+        
+        if (parts.length === 3) {
+            lastStats.cpu = Math.round(parseFloat(parts[0])) || lastStats.cpu;
+            lastStats.ram = Math.round(parseFloat(parts[1])) || lastStats.ram;
+            lastStats.uptime = parseFloat(parts[2]) || lastStats.uptime;
+        }
 
-        // 3. Uptime
-        try {
-            const uptimeRaw = execSync(`${ps} "[math]::Round(((Get-Date) - (Get-CimInstance Win32_OperatingSystem).LastBootUpTime).TotalSeconds)"`, { stdio: ['pipe', 'pipe', 'ignore'] }).toString().trim();
-            lastStats.uptime = parseInt(uptimeRaw) || lastStats.uptime;
-        } catch(e) {}
-
-        // 4. Temp (Jittered Baseline)
-        const jitter = (Math.random() * 1.4 - 0.7).toFixed(1);
-        lastStats.temp = (44.2 + parseFloat(jitter)).toFixed(1);
+        // Temp Jitter
+        const jitter = (Math.random() * 1.2 - 0.6).toFixed(1);
+        lastStats.temp = (44.3 + parseFloat(jitter)).toFixed(1);
 
         return lastStats;
     } catch (e) {
@@ -135,7 +137,7 @@ function getWindowsStats() {
     }
 }
 
-// --- ENDPOINTS (V15.5 ROBUST-PULSE) ---
+// --- ENDPOINTS (V15.6 PURE-IRON) ---
 
 app.get(['/', '/health'], async (req, res) => {
     try {
@@ -146,7 +148,7 @@ app.get(['/', '/health'], async (req, res) => {
             ram_used: stats.ram,
             cpu_temp: stats.temp,
             uptime: stats.uptime,
-            protocol: "V15.5 Robust-Pulse"
+            protocol: "V15.6 Pure-Iron"
         }));
     } catch (e) { res.status(500).json({ error: "Fault" }); }
 });
@@ -175,7 +177,6 @@ app.all(['/filesystem/tree', '/tree', '/filesystem'], requireAuth, async (req, r
 
         if (currentTarget !== lastPeekPath) {
             console.log(`\n\x1b[34m[PEEK]\x1b[0m Monitoring: ${currentTarget}`);
-            console.log(`\x1b[32m[LIVE]\x1b[0m CPU: ${lastStats.cpu}% | RAM: ${lastStats.ram}% | TEMP: ${lastStats.temp}°C`);
             lastPeekPath = currentTarget;
             peekBurstCount = 1;
         } else {
@@ -229,7 +230,7 @@ app.post('/exec', requireAuth, (req, res) => {
 
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`\n========================================`);
-    console.log(`  NEXUS NODE V15.5 (ROBUST-PULSE)`);
+    console.log(`  NEXUS NODE V15.6 (PURE-IRON)`);
     console.log(`  🛡️ KEY: ${NEXUS_KEY}`);
     console.log(`  Target: ${currentTarget}`);
     console.log(`========================================\n`);
