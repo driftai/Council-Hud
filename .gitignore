@@ -49,3 +49,4 @@ Council-Data-Router/config/paths.json
 Council-Data-Router/backup/
 Council-Data-Router/*.log
 Council-Data-Router/*.bak
+node_modules/
