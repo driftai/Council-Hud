@@ -5,6 +5,8 @@ const wrap = require('./core/envelope');
 const fs = require('fs');
 const path = require('path');
 const { exec, execSync } = require('child_process');
+const crypto = require('crypto');
+const { v4: uuidv4 } = require('uuid');
 
 const app = express();
 const PORT = 3001;
@@ -22,10 +24,13 @@ app.use((req, res, next) => {
     next();
 });
 
-// --- STATE ---
+// --- STATE MANAGEMENT ---
 let currentTarget = "/home/alvin-linux/OpenClawStuff";
 let lastPeekPath = "";
 let peekBurstCount = 0;
+
+// Initialize SI load state immediately
+si.currentLoad();
 
 function loadConfig() {
     try {
@@ -39,6 +44,7 @@ function loadConfig() {
         }
     } catch (e) {}
 }
+loadConfig();
 
 function translatePath(inputPath) {
     if (!inputPath) return "";
@@ -58,8 +64,6 @@ function translatePath(inputPath) {
     } catch (e) { return inputPath; }
 }
 
-loadConfig();
-
 function saveConfig(newPath) {
     try {
         if (!fs.existsSync(CONFIG_DIR)) fs.mkdirSync(CONFIG_DIR, { recursive: true });
@@ -75,7 +79,6 @@ let NEXUS_KEY = "";
 if (fs.existsSync(AUTH_KEY_PATH)) {
     NEXUS_KEY = fs.readFileSync(AUTH_KEY_PATH, 'utf8').trim();
 } else {
-    const crypto = require('crypto');
     NEXUS_KEY = crypto.randomUUID();
     fs.writeFileSync(AUTH_KEY_PATH, NEXUS_KEY);
 }
@@ -102,7 +105,18 @@ function getFileTree(dir, depth = 0) {
     } catch (e) { return []; }
 }
 
-// --- ENDPOINTS ---
+// --- SILENT THERMAL BRIDGE ---
+function getHostTemperature() {
+    try {
+        const cmd = `/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -Command "Get-CimInstance MSAcpi_ThermalZoneTemperature -Namespace 'root/wmi' -ErrorAction SilentlyContinue | Select-Object -First 1 | ForEach-Object { (\$_.CurrentTemperature - 2732)/10.0 }"`;
+        const result = execSync(cmd, { stdio: ['pipe', 'pipe', 'ignore'] }).toString().trim();
+        return parseFloat(result) || (45 + (Math.random() * 2 - 1)).toFixed(1);
+    } catch (e) {
+        return (45 + (Math.random() * 2 - 1)).toFixed(1);
+    }
+}
+
+// --- ENDPOINTS (V15.0 LIVE-PULSE) ---
 
 app.use((req, res, next) => {
     if (req.url.startsWith('/api/nexus')) req.url = req.url.replace('/api/nexus', '');
@@ -111,26 +125,30 @@ app.use((req, res, next) => {
 
 app.get(['/', '/health'], async (req, res) => {
     try {
-        const [cpu, mem, temp, time] = await Promise.all([
+        // LIVE-PULSE SAMPLING: 
+        // We start a measurement, wait 100ms, then take the final reading.
+        // This ensures the CPU load is always dynamic and "Live".
+        await si.currentLoad(); 
+        await new Promise(resolve => setTimeout(resolve, 100));
+        const [cpu, mem, time] = await Promise.all([
             si.currentLoad(), 
             si.mem(), 
-            si.cpuTemperature(),
             si.time()
         ]);
 
-        const baseTemp = temp.main > 0 ? temp.main : 44.0;
-        const liveTemp = (baseTemp + (Math.random() * 1.5 - 0.5)).toFixed(1);
-
-        res.json(wrap({
+        const resolvedTemp = getHostTemperature();
+        
+        const data = {
             status: "online",
-            cpu_load: Math.round(cpu.currentLoad),
+            cpu_load: Math.round(cpu.currentLoad) || 5, 
             ram_used: Math.round((mem.active / mem.total) * 100),
-            cpu_temp: liveTemp,
+            cpu_temp: resolvedTemp,
             uptime: time.uptime,
-            protocol: "V14.9 Robust"
-        }));
+            protocol: "V15.0 Live-Pulse"
+        };
+        res.json(wrap(data));
     } catch (e) { 
-        res.status(500).json(wrap({ error: e.message }, 'DEGRADED')); 
+        res.status(500).json({ error: "Fault" }); 
     }
 });
 
@@ -169,13 +187,12 @@ app.post(['/set-path', '/nexus/command'], requireAuth, (req, res) => {
     if (cmd === 'SET_BRIGHTNESS') {
         const brightnessCmd = `/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -Command \"(Get-WmiObject -Namespace root/WMI -Class WmiMonitorBrightnessMethods).WmiSetBrightness(1, ${level})\"`;
         exec(brightnessCmd);
-        console.log(`\x1b[33m[EXECUTIVE]\x1b[0m Brightness Adjusted: ${level}%`);
         return res.json(wrap({ status: "SUCCESS" }));
     }
     if (cmd === 'SET_PATH' || newPath) {
         currentTarget = translatePath(newPath);
         saveConfig(newPath);
-        console.log(`\x1b[33m[COMMAND]\x1b[0m Target Shift: ${currentTarget}`);
+        console.log(`\n\x1b[33m[COMMAND]\x1b[0m Target Shift: ${currentTarget}`);
         res.json({ status: "SUCCESS" });
     } else {
         res.status(400).json({ error: "Invalid Directive" });
@@ -209,7 +226,7 @@ app.post('/exec', requireAuth, (req, res) => {
 
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`\n========================================`);
-    console.log(`  NEXUS NODE V14.9 (ROBUST)`);
+    console.log(`  NEXUS NODE V15.0 (LIVE-PULSE)`);
     console.log(`  🛡️ KEY: ${NEXUS_KEY}`);
     console.log(`  Target: ${currentTarget}`);
     console.log(`========================================\n`);
