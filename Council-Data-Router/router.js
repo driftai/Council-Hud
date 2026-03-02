@@ -31,7 +31,7 @@ if (fs.existsSync(AUTH_KEY_PATH)) {
 const requireAuth = (req, res, next) => {
     if (req.url === '/health' || req.url === '/' || req.url.includes('health')) return next();
     const clientKey = req.headers['x-nexus-key'];
-    if (!clientKey || clientKey !== NEXUS_KEY) return res.status(401).json({ error: "UNAUTHORIZED" });
+    if (!clientKey || clientKey !== NEXUS_KEY) return res.status(401).json({ error: "UNAUTHORIZED" });    
     next();
 };
 
@@ -44,17 +44,14 @@ function translatePath(inputPath) {
         let decoded = decodeURIComponent(inputPath);
         let normalized = decoded.replace(/\\/g, '/');
         
-        // Strip UNC/WSL prefixes aggressively
         normalized = normalized.replace(/^(\/\/wsl\.localhost\/Ubuntu|\/\/wsl\$\/Ubuntu)/i, '');
         normalized = normalized.replace(/^(\/\/wsl\.localhost|\/\/wsl\$)/i, '');
 
-        // Handle Windows Drive Mapping (C:/ -> /mnt/c/)
         if (normalized.match(/^[a-zA-Z]:\//)) {
             const drive = normalized.charAt(0).toLowerCase();
             normalized = `/mnt/${drive}/${normalized.substring(3)}`;
         }
-        
-        // Fix common WSL /Users/ mapping
+
         if (normalized.startsWith('/Users/') && !normalized.startsWith('/mnt/')) {
             normalized = '/mnt/c' + normalized;
         }
@@ -72,12 +69,11 @@ function loadConfig() {
     try {
         if (fs.existsSync(CONFIG_PATH)) {
             const rawData = fs.readFileSync(CONFIG_PATH, 'utf8');
-            const cleanData = rawData.replace(/^[^{]*/, ''); 
+            const cleanData = rawData.replace(/^[^{]*/, '');
             const conf = JSON.parse(cleanData);
             if (conf.mirrored_paths && conf.mirrored_paths[0]) {
-                // FIXED: Must translate the persisted path on load!
                 currentTarget = translatePath(conf.mirrored_paths[0]);
-                console.log(`\x1b[32m[CONFIG]\x1b[0m Path Restored & Translated: ${currentTarget}`);
+                console.log(`\x1b[32m[CONFIG]\x1b[0m Path Restored & Translated: ${currentTarget}`);      
             }
         }
     } catch (e) { console.log(`\x1b[31m[CONFIG]\x1b[0m Restore failed: ${e.message}`); }
@@ -95,7 +91,7 @@ function saveConfig(newPath) {
 // 📂 DEEP PEEK
 // ==========================================
 function getFileTree(dir, depth = 0) {
-    if (depth > 3) return []; 
+    if (depth > 3) return [];
     try {
         const dirents = fs.readdirSync(dir, { withFileTypes: true });
         return dirents.map((dirent) => {
@@ -111,13 +107,20 @@ function getFileTree(dir, depth = 0) {
 
 function wrap(payload) {
     return {
-        header: { node_id: "WSL-ALVIN-01", packet_id: uuidv4(), timestamp: new Date().toISOString(), schema_version: "2.1.0", status: "STABLE" },
+        header: { 
+            node_id: "WSL-ALVIN-01", 
+            packet_id: uuidv4(), 
+            timestamp: new Date().toISOString(), 
+            schema_version: "2.1.0", 
+            status: "STABLE",
+            priority: "REALTIME"
+        },
         payload,
-        ...payload
+        ...payload // Flat merge for backward compatibility
     };
 }
 
-// --- ENDPOINTS (V14 UNIFIED) ---
+// --- ENDPOINTS (V14.1 TELEMETRY SYNC) ---
 
 app.use((req, res, next) => {
     if (req.url.startsWith('/api/nexus')) req.url = req.url.replace('/api/nexus', '');
@@ -127,14 +130,16 @@ app.use((req, res, next) => {
 app.get(['/', '/health'], async (req, res) => {
     try {
         const [cpu, mem, temp, time] = await Promise.all([si.currentLoad(), si.mem(), si.cpuTemperature(), si.time()]);
-        res.json({ 
-            status: "online", 
-            cpu_load: Math.round(cpu.currentLoad), 
-            ram_used: Math.round((mem.active / mem.total) * 100), 
+        const data = {
+            status: "online",
+            cpu_load: Math.round(cpu.currentLoad),
+            ram_used: Math.round((mem.active / mem.total) * 100),
             cpu_temp: temp.main || 45,
             uptime: time.uptime,
-            protocol: "V14 Zero-Fault" 
-        });
+            protocol: "V14.1 Telemetry Sync"
+        };
+        // FIXED: Return wrapped envelope so HUD can see the data
+        res.json(wrap(data));
     } catch (e) { res.status(500).json({ error: "Fault" }); }
 });
 
@@ -152,7 +157,7 @@ app.all(['/filesystem/tree', '/tree', '/filesystem'], requireAuth, async (req, r
         currentTarget = translatePath(rawPath);
         saveConfig(rawPath);
     }
-    
+
     const tree = getFileTree(currentTarget);
 
     if (currentTarget !== lastPeekPath) {
@@ -162,31 +167,33 @@ app.all(['/filesystem/tree', '/tree', '/filesystem'], requireAuth, async (req, r
         peekBurstCount = 1;
     } else {
         peekBurstCount++;
-        if (peekBurstCount % 5 === 0) process.stdout.write('\x1b[34m.\x1b[0m'); 
+        if (peekBurstCount % 5 === 0) process.stdout.write('\x1b[34m.\x1b[0m');
     }
 
-    res.json(tree); 
+    res.json(wrap({ tree, root_path: currentTarget }));
 });
 
 app.post(['/set-path', '/nexus/command', '/command'], requireAuth, (req, res) => {
-    const { cmd, path: newPath } = req.body;
-    if (cmd === 'SET_PATH' || newPath) {
+    const { cmd, path: newPath, pid } = req.body;
+    const directive = cmd || (newPath ? 'SET_PATH' : null);
+    console.log(`\x1b[33m[COMMAND]\x1b[0m ${directive}`);
+
+    if (directive === 'SET_PATH' && newPath) {
         currentTarget = translatePath(newPath);
         saveConfig(newPath);
-        console.log(`\n\x1b[33m[COMMAND]\x1b[0m Path Set: ${currentTarget}`);
-        res.json({ status: "SUCCESS" });
+        console.log(`\x1b[33m[COMMAND]\x1b[0m Path Set: ${currentTarget}`);
+        res.json(wrap({ status: "SUCCESS" }));
     } else {
-        res.status(400).json({ error: "Invalid Directive" });
+        res.status(400).json(wrap({ error: "Invalid Directive" }));
     }
 });
 
-// Terminal/File proxies
 app.post(['/read-file', '/read-local'], requireAuth, (req, res) => {
     const target = translatePath(req.body.path || req.body.filepath);
     try {
         const content = fs.readFileSync(target, 'utf8');
-        res.json({ content, path: target });
-    } catch (e) { res.status(404).json({ error: "Not Found" }); }
+        res.json(wrap({ content, path: target }));
+    } catch (e) { res.status(404).json(wrap({ error: "Not Found" })); }
 });
 
 app.post('/write-file', requireAuth, (req, res) => {
@@ -194,21 +201,21 @@ app.post('/write-file', requireAuth, (req, res) => {
     try {
         fs.mkdirSync(path.dirname(target), { recursive: true });
         fs.writeFileSync(target, req.body.content, 'utf8');
-        res.json({ status: "success" });
-    } catch (err) { res.status(500).json({ error: err.message }); }
+        res.json(wrap({ status: "success" }));
+    } catch (err) { res.status(500).json(wrap({ error: err.message })); }
 });
 
 app.post('/exec', requireAuth, (req, res) => {
     const { command, cwd } = req.body;
     const targetDir = translatePath(cwd) || currentTarget;
     exec(command, { cwd: targetDir, maxBuffer: 1024*1024*10 }, (error, stdout, stderr) => {
-        res.json({ output: stdout, stderr, exitCode: error ? error.code : 0 });
+        res.json(wrap({ output: stdout, stderr, exitCode: error ? error.code : 0 }));
     });
 });
 
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`\n========================================`);
-    console.log(`  NEXUS NODE V14 (ZERO-FAULT)`);
+    console.log(`  NEXUS NODE V14.1 (TELEMETRY SYNC)`);
     console.log(`  🛡️ KEY: ${NEXUS_KEY}`);
     console.log(`  Target: ${currentTarget}`);
     console.log(`========================================\n`);
