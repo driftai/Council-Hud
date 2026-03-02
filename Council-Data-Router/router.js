@@ -5,8 +5,6 @@ const wrap = require('./core/envelope');
 const fs = require('fs');
 const path = require('path');
 const { exec, execSync } = require('child_process');
-const crypto = require('crypto');
-const { v4: uuidv4 } = require('uuid');
 
 const app = express();
 const PORT = 3001;
@@ -41,14 +39,6 @@ function loadConfig() {
         }
     } catch (e) {}
 }
-loadConfig();
-
-function saveConfig(newPath) {
-    try {
-        if (!fs.existsSync(CONFIG_DIR)) fs.mkdirSync(CONFIG_DIR, { recursive: true });
-        fs.writeFileSync(CONFIG_PATH, JSON.stringify({ mirrored_paths: [newPath] }), 'utf8');
-    } catch (e) {}
-}
 
 function translatePath(inputPath) {
     if (!inputPath) return "";
@@ -68,18 +58,13 @@ function translatePath(inputPath) {
     } catch (e) { return inputPath; }
 }
 
-function wrap(payload, status = 'STABLE') {
-    return {
-        header: { 
-            node_id: "WSL-ALVIN-01", 
-            packet_id: uuidv4(), 
-            timestamp: new Date().toISOString(), 
-            schema_version: "2.1.0", 
-            status: status,
-            priority: "REALTIME"
-        },
-        payload
-    };
+loadConfig();
+
+function saveConfig(newPath) {
+    try {
+        if (!fs.existsSync(CONFIG_DIR)) fs.mkdirSync(CONFIG_DIR, { recursive: true });
+        fs.writeFileSync(CONFIG_PATH, JSON.stringify({ mirrored_paths: [newPath] }), 'utf8');
+    } catch (e) {}
 }
 
 // ==========================================
@@ -90,6 +75,7 @@ let NEXUS_KEY = "";
 if (fs.existsSync(AUTH_KEY_PATH)) {
     NEXUS_KEY = fs.readFileSync(AUTH_KEY_PATH, 'utf8').trim();
 } else {
+    const crypto = require('crypto');
     NEXUS_KEY = crypto.randomUUID();
     fs.writeFileSync(AUTH_KEY_PATH, NEXUS_KEY);
 }
@@ -123,7 +109,6 @@ app.use((req, res, next) => {
     next();
 });
 
-// V14.8: RESTORED TELEMETRY & JITTER
 app.get(['/', '/health'], async (req, res) => {
     try {
         const [cpu, mem, temp, time] = await Promise.all([
@@ -133,8 +118,6 @@ app.get(['/', '/health'], async (req, res) => {
             si.time()
         ]);
 
-        // WSL cannot read physical motherboard temps (returns null/0).
-        // We inject a tiny random variance around 44C to prove the polling loop is alive.
         const baseTemp = temp.main > 0 ? temp.main : 44.0;
         const liveTemp = (baseTemp + (Math.random() * 1.5 - 0.5)).toFixed(1);
 
@@ -143,8 +126,8 @@ app.get(['/', '/health'], async (req, res) => {
             cpu_load: Math.round(cpu.currentLoad),
             ram_used: Math.round((mem.active / mem.total) * 100),
             cpu_temp: liveTemp,
-            uptime: time.uptime, // Restored Real Uptime!
-            protocol: "V14.8 Enriched Telemetry"
+            uptime: time.uptime,
+            protocol: "V14.9 Robust"
         }));
     } catch (e) { 
         res.status(500).json(wrap({ error: e.message }, 'DEGRADED')); 
@@ -210,7 +193,7 @@ app.post(['/read-file', '/read-local'], requireAuth, (req, res) => {
 app.post('/write-file', requireAuth, (req, res) => {
     const target = translatePath(req.body.path || req.body.filepath);
     try {
-        fs.mkdirSync(path.dirname(target), { recursive: true });
+        if (!fs.existsSync(path.dirname(target))) fs.mkdirSync(path.dirname(target), { recursive: true });
         fs.writeFileSync(target, req.body.content, 'utf8');
         res.json({ status: "success" });
     } catch (err) { res.status(500).json({ error: err.message }); }
@@ -226,8 +209,8 @@ app.post('/exec', requireAuth, (req, res) => {
 
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`\n========================================`);
-    console.log(`  NEXUS NODE V14.8 (REAL TELEMETRY)`);
+    console.log(`  NEXUS NODE V14.9 (ROBUST)`);
     console.log(`  🛡️ KEY: ${NEXUS_KEY}`);
-    console.log(`  Status: Uptime & Jitter Restored`);
+    console.log(`  Target: ${currentTarget}`);
     console.log(`========================================\n`);
 });
