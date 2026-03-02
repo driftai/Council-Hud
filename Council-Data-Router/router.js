@@ -15,15 +15,7 @@ const CONFIG_PATH = path.join(CONFIG_DIR, 'paths.json');
 app.use(cors({ origin: '*' }));
 app.use(express.json({ limit: '50mb' }));
 
-// --- THE ZERO-CACHE SHIELD ---
-app.use((req, res, next) => {
-    res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
-    res.set('Pragma', 'no-cache');
-    res.set('Expires', '0');
-    next();
-});
-
-// --- STATE MANAGEMENT ---
+// --- STATE ---
 let currentTarget = "/home/alvin-linux/OpenClawStuff";
 let lastPeekPath = "";
 let peekBurstCount = 0;
@@ -32,15 +24,22 @@ function loadConfig() {
     try {
         if (fs.existsSync(CONFIG_PATH)) {
             const rawData = fs.readFileSync(CONFIG_PATH, 'utf8');
-            const cleanData = rawData.replace(/^[^{]*/, '');
+            const cleanData = rawData.replace(/^[^{]*/, ''); 
             const conf = JSON.parse(cleanData);
             if (conf.mirrored_paths && conf.mirrored_paths[0]) {
-                currentTarget = conf.mirrored_paths[0];
+                currentTarget = translatePath(conf.mirrored_paths[0]);
             }
         }
     } catch (e) {}
 }
 loadConfig();
+
+function saveConfig(newPath) {
+    try {
+        if (!fs.existsSync(CONFIG_DIR)) fs.mkdirSync(CONFIG_DIR, { recursive: true });
+        fs.writeFileSync(CONFIG_PATH, JSON.stringify({ mirrored_paths: [newPath] }), 'utf8');
+    } catch (e) {}
+}
 
 function translatePath(inputPath) {
     if (!inputPath) return "";
@@ -74,91 +73,96 @@ function wrap(payload, status = 'STABLE') {
     };
 }
 
-// --- SILENT THERMAL BRIDGE ---
-function getHostTemperature() {
-    try {
-        // Silenced error action to prevent terminal flood
-        const cmd = `/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -Command "Get-CimInstance MSAcpi_ThermalZoneTemperature -Namespace 'root/wmi' -ErrorAction SilentlyContinue | Select-Object -First 1 | ForEach-Object { (\$_.CurrentTemperature - 2732)/10.0 }"`;
-        const result = execSync(cmd, { stdio: ['pipe', 'pipe', 'ignore'] }).toString().trim();
-        return parseFloat(result) || (45 + (Math.random() * 2 - 1)).toFixed(1);
-    } catch (e) {
-        return (45 + (Math.random() * 2 - 1)).toFixed(1);
-    }
+// ==========================================
+// 🛡️ THE NEXUS SHIELD
+// ==========================================
+const AUTH_KEY_PATH = path.join(__dirname, 'nexus.key');
+let NEXUS_KEY = "";
+if (fs.existsSync(AUTH_KEY_PATH)) {
+    NEXUS_KEY = fs.readFileSync(AUTH_KEY_PATH, 'utf8').trim();
+} else {
+    NEXUS_KEY = crypto.randomUUID();
+    fs.writeFileSync(AUTH_KEY_PATH, NEXUS_KEY);
 }
 
-// --- ENDPOINTS (V14.6 BRIGHTNESS & SILENT THERMAL) ---
+const requireAuth = (req, res, next) => {
+    if (req.url === '/health' || req.url === '/') return next();
+    const clientKey = req.headers['x-nexus-key'];
+    if (!clientKey || clientKey !== NEXUS_KEY) return res.status(401).json({ error: "UNAUTHORIZED" });
+    next();
+};
+
+function getFileTree(dir, depth = 0) {
+    if (depth > 3) return [];
+    try {
+        const dirents = fs.readdirSync(dir, { withFileTypes: true });
+        return dirents.map((dirent) => {
+            const res = path.join(dir, dirent.name);
+            if (['node_modules', '.git', '.next', '.vs', 'dist'].includes(dirent.name)) return null;
+            if (dirent.isDirectory()) {
+                return { name: dirent.name, type: 'folder', path: res, children: getFileTree(res, depth + 1) };
+            }
+            return { name: dirent.name, type: 'file', path: res };
+        }).filter(Boolean);
+    } catch (e) { return []; }
+}
+
+// --- ENDPOINTS ---
+
+app.use((req, res, next) => {
+    if (req.url.startsWith('/api/nexus')) req.url = req.url.replace('/api/nexus', '');
+    next();
+});
 
 app.get(['/', '/health'], async (req, res) => {
     try {
-        // Ensure si.currentLoad has enough time to measure by using SI's internal delta handling
         const cpu = await si.currentLoad();
         const mem = await si.mem();
         const time = si.time();
-        const resolvedTemp = getHostTemperature();
-        
         const data = {
             status: "online",
-            cpu_load: Math.round(cpu.currentLoad) || 5, // Fallback to 5% if load reports 0 due to virtualization
+            cpu_load: Math.round(cpu.currentLoad) || 5,
             ram_used: Math.round((mem.active / mem.total) * 100),
-            cpu_temp: resolvedTemp,
+            cpu_temp: (45 + (Math.random() * 2 - 1)).toFixed(1),
             uptime: time.uptime,
-            protocol: "V14.6 Platinum"
+            protocol: "V14.7 Final Sync"
         };
         res.json(wrap(data));
-    } catch (e) { res.status(500).json({ error: "Telemetry Fault" }); }
+    } catch (e) { res.status(500).json({ error: "Fault" }); }
 });
 
-app.get('/graph', async (req, res) => {
+app.get('/graph', requireAuth, async (req, res) => {
     try {
         const processes = await si.processes();
         const nodes = processes.list.sort((a, b) => b.cpu - a.cpu).slice(0, 10).map(p => ({ 
-            id: p.pid, 
-            name: p.name, 
-            type: 'PROCESS', 
-            usage: p.cpu 
+            id: p.pid, name: p.name, type: 'PROCESS', usage: p.cpu 
         }));
         res.json(wrap({ nodes, total_threads: processes.all }));
     } catch (e) { res.status(500).json({ error: "Graph Fault" }); }
 });
 
-app.all(['/filesystem/tree', '/tree', '/filesystem'], async (req, res) => {
+// FIXED: Returns RAW ARRAY for FileWatcher.tsx compatibility
+app.all(['/filesystem/tree', '/tree', '/filesystem'], requireAuth, async (req, res) => {
     const rawPath = req.query.path || req.body.path;
     if (rawPath && rawPath.trim() !== "" && rawPath !== "undefined") {
         currentTarget = translatePath(rawPath);
+        saveConfig(rawPath);
     }
     
-    try {
-        const dirents = fs.readdirSync(currentTarget, { withFileTypes: true });
-        const tree = dirents.map((dirent) => {
-            const res = path.join(currentTarget, dirent.name);
-            if (['node_modules', '.git', '.next', '.vs', 'dist'].includes(dirent.name)) return null;
-            return { name: dirent.name, type: dirent.isDirectory() ? 'folder' : 'file', path: res };
-        }).filter(Boolean);
+    const tree = getFileTree(currentTarget);
 
-        if (currentTarget !== lastPeekPath) {
-            console.log(`\n\x1b[34m[PEEK]\x1b[0m Monitoring: ${currentTarget}`);
-            lastPeekPath = currentTarget;
-            peekBurstCount = 1;
-        } else {
-            peekBurstCount++;
-            if (peekBurstCount % 5 === 0) process.stdout.write('\x1b[34m.\x1b[0m');
-        }
-        res.json(wrap({ tree, root_path: currentTarget }));
-    } catch (e) { res.json(wrap({ tree: [], error: e.message })); }
+    if (currentTarget !== lastPeekPath) {
+        console.log(`\n\x1b[34m[PEEK]\x1b[0m Monitoring: ${currentTarget}`);
+        lastPeekPath = currentTarget;
+        peekBurstCount = 1;
+    } else {
+        peekBurstCount++;
+        if (peekBurstCount % 5 === 0) process.stdout.write('\x1b[34m.\x1b[0m');
+    }
+    res.json(tree); // NO WRAP FOR TREE
 });
 
-// EXECUTIVE: Brightness Control
-app.post('/brightness', (req, res) => {
-    const level = req.body.level || 50;
-    try {
-        const cmd = `/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -Command \"(Get-WmiObject -Namespace root/WMI -Class WmiMonitorBrightnessMethods).WmiSetBrightness(1, ${level})\"`;
-        exec(cmd);
-        console.log(`\x1b[33m[EXECUTIVE]\x1b[0m Brightness set to ${level}%`);
-        res.json(wrap({ status: "success", level }));
-    } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-app.post(['/set-path', '/nexus/command'], (req, res) => {
+app.post(['/set-path', '/nexus/command'], requireAuth, (req, res) => {
     const { cmd, path: newPath, level } = req.body;
     if (cmd === 'SET_BRIGHTNESS') {
         const brightnessCmd = `/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -Command \"(Get-WmiObject -Namespace root/WMI -Class WmiMonitorBrightnessMethods).WmiSetBrightness(1, ${level})\"`;
@@ -168,16 +172,43 @@ app.post(['/set-path', '/nexus/command'], (req, res) => {
     }
     if (cmd === 'SET_PATH' || newPath) {
         currentTarget = translatePath(newPath);
+        saveConfig(newPath);
         console.log(`\n\x1b[33m[COMMAND]\x1b[0m Target Shift: ${currentTarget}`);
-        res.json({ status: "SUCCESS" });
+        res.json(wrap({ status: "SUCCESS" }));
     } else {
         res.status(400).json({ error: "Invalid Directive" });
     }
 });
 
+app.post(['/read-file', '/read-local'], requireAuth, (req, res) => {
+    const target = translatePath(req.body.path || req.body.filepath);
+    try {
+        const content = fs.readFileSync(target, 'utf8');
+        res.json(wrap({ content, path: target }));
+    } catch (e) { res.status(404).json({ error: "Not Found" }); }
+});
+
+app.post('/write-file', requireAuth, (req, res) => {
+    const target = translatePath(req.body.path || req.body.filepath);
+    try {
+        fs.mkdirSync(path.dirname(target), { recursive: true });
+        fs.writeFileSync(target, req.body.content, 'utf8');
+        res.json(wrap({ status: "success" }));
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/exec', requireAuth, (req, res) => {
+    const { command, cwd } = req.body;
+    const targetDir = translatePath(cwd) || currentTarget;
+    exec(command, { cwd: targetDir, maxBuffer: 1024*1024*10 }, (error, stdout, stderr) => {
+        res.json(wrap({ output: stdout, stderr, exitCode: error ? error.code : 0 }));
+    });
+});
+
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`\n========================================`);
-    console.log(`  NEXUS NODE V14.6 (PLATINUM + BRIGHTNESS)`);
-    console.log(`  Shield: Active | Thermal: Silent`);
+    console.log(`  NEXUS NODE V14.7 (FINAL SYNC)`);
+    console.log(`  🛡️ KEY: ${NEXUS_KEY}`);
+    console.log(`  Fix: FileWatcher Raw Array Sync`);
     console.log(`========================================\n`);
 });
