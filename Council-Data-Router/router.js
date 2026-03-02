@@ -23,10 +23,24 @@ app.use((req, res, next) => {
     next();
 });
 
+// --- STATE MANAGEMENT ---
 let currentTarget = "/home/alvin-linux/OpenClawStuff";
 let lastPeekPath = "";
 let peekBurstCount = 0;
 let lastStats = { cpu: 5, ram: 40, temp: 44.0, uptime: 0 };
+
+function loadConfig() {
+    try {
+        if (fs.existsSync(CONFIG_PATH)) {
+            const rawData = fs.readFileSync(CONFIG_PATH, 'utf8');
+            const cleanData = rawData.replace(/^[^{]*/, ''); 
+            const conf = JSON.parse(cleanData);
+            if (conf.mirrored_paths && conf.mirrored_paths[0]) {
+                currentTarget = translatePath(conf.mirrored_paths[0]);
+            }
+        }
+    } catch (e) {}
+}
 
 function translatePath(inputPath) {
     if (!inputPath) return "";
@@ -46,6 +60,49 @@ function translatePath(inputPath) {
     } catch (e) { return inputPath; }
 }
 
+loadConfig();
+
+function saveConfig(newPath) {
+    try {
+        if (!fs.existsSync(CONFIG_DIR)) fs.mkdirSync(CONFIG_DIR, { recursive: true });
+        fs.writeFileSync(CONFIG_PATH, JSON.stringify({ mirrored_paths: [newPath] }), 'utf8');
+    } catch (e) {}
+}
+
+// ==========================================
+// 🛡️ THE NEXUS SHIELD
+// ==========================================
+const AUTH_KEY_PATH = path.join(__dirname, 'nexus.key');
+let NEXUS_KEY = "";
+if (fs.existsSync(AUTH_KEY_PATH)) {
+    NEXUS_KEY = fs.readFileSync(AUTH_KEY_PATH, 'utf8').trim();
+} else {
+    NEXUS_KEY = crypto.randomUUID();
+    fs.writeFileSync(AUTH_KEY_PATH, NEXUS_KEY);
+}
+
+const requireAuth = (req, res, next) => {
+    if (req.url === '/health' || req.url === '/' || req.url.includes('health')) return next();
+    const clientKey = req.headers['x-nexus-key'];
+    if (!clientKey || clientKey !== NEXUS_KEY) return res.status(401).json({ error: "UNAUTHORIZED" });
+    next();
+};
+
+function getFileTree(dir, depth = 0) {
+    if (depth > 3) return [];
+    try {
+        const dirents = fs.readdirSync(dir, { withFileTypes: true });
+        return dirents.map((dirent) => {
+            const res = path.join(dir, dirent.name);
+            if (['node_modules', '.git', '.next', '.vs', 'dist', 'System Volume Information', '$RECYCLE.BIN'].includes(dirent.name)) return null;
+            if (dirent.isDirectory()) {
+                return { name: dirent.name, type: 'folder', path: res, children: getFileTree(res, depth + 1) };
+            }
+            return { name: dirent.name, type: 'file', path: res };
+        }).filter(Boolean);
+    } catch (e) { return []; }
+}
+
 function getWindowsStats() {
     try {
         const ps = "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -Command";
@@ -57,7 +114,6 @@ function getWindowsStats() {
         } catch(e) {}
 
         // 2. RAM (Live Committed %)
-        // Using Win32_PerfFormattedData_PerfOS_Memory for high-frequency updates
         try {
             const ramRaw = execSync(`${ps} "(Get-CimInstance Win32_PerfFormattedData_PerfOS_Memory).PercentCommittedBytesInUse"`, { stdio: ['pipe', 'pipe', 'ignore'] }).toString().trim();
             lastStats.ram = parseInt(ramRaw) || lastStats.ram;
@@ -69,7 +125,7 @@ function getWindowsStats() {
             lastStats.uptime = parseInt(uptimeRaw) || lastStats.uptime;
         } catch(e) {}
 
-        // 4. Temp (Jittered Baseline - Resolves Access Denied Errors)
+        // 4. Temp (Jittered Baseline)
         const jitter = (Math.random() * 1.4 - 0.7).toFixed(1);
         lastStats.temp = (44.2 + parseFloat(jitter)).toFixed(1);
 
@@ -78,6 +134,8 @@ function getWindowsStats() {
         return lastStats;
     }
 }
+
+// --- ENDPOINTS (V15.5 ROBUST-PULSE) ---
 
 app.get(['/', '/health'], async (req, res) => {
     try {
@@ -88,12 +146,12 @@ app.get(['/', '/health'], async (req, res) => {
             ram_used: stats.ram,
             cpu_temp: stats.temp,
             uptime: stats.uptime,
-            protocol: "V15.4 Iron-Pulse-RAM"
+            protocol: "V15.5 Robust-Pulse"
         }));
     } catch (e) { res.status(500).json({ error: "Fault" }); }
 });
 
-app.get('/graph', async (req, res) => {
+app.get('/graph', requireAuth, async (req, res) => {
     try {
         const processes = await si.processes();
         const nodes = processes.list.sort((a, b) => b.cpu - a.cpu).slice(0, 10).map(p => ({ id: p.pid, name: p.name, type: 'PROCESS', usage: p.cpu }));
@@ -132,10 +190,11 @@ app.all(['/filesystem/tree', '/tree', '/filesystem'], requireAuth, async (req, r
     } catch (e) { res.json([]); }
 });
 
-app.post(['/set-path', '/nexus/command'], (req, res) => {
+app.post(['/set-path', '/nexus/command'], requireAuth, (req, res) => {
     const { cmd, path: newPath } = req.body;
     if (cmd === 'SET_PATH' || newPath) {
         currentTarget = translatePath(newPath);
+        saveConfig(newPath);
         console.log(`\n\x1b[33m[COMMAND]\x1b[0m Target Shift: ${currentTarget}`);
         res.json({ status: "SUCCESS" });
     } else {
@@ -143,9 +202,35 @@ app.post(['/set-path', '/nexus/command'], (req, res) => {
     }
 });
 
+app.post(['/read-file', '/read-local'], requireAuth, (req, res) => {
+    const target = translatePath(req.body.path || req.body.filepath);
+    try {
+        const content = fs.readFileSync(target, 'utf8');
+        res.json(wrap({ content, path: target }));
+    } catch (e) { res.status(404).json({ error: "Not Found" }); }
+});
+
+app.post('/write-file', requireAuth, (req, res) => {
+    const target = translatePath(req.body.path || req.body.filepath);
+    try {
+        if (!fs.existsSync(path.dirname(target))) fs.mkdirSync(path.dirname(target), { recursive: true });
+        fs.writeFileSync(target, req.body.content, 'utf8');
+        res.json({ status: "success" });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/exec', requireAuth, (req, res) => {
+    const { command, cwd } = req.body;
+    const targetDir = translatePath(cwd) || currentTarget;
+    exec(command, { cwd: targetDir, maxBuffer: 1024*1024*10 }, (error, stdout, stderr) => {
+        res.json(wrap({ output: stdout, stderr, exitCode: error ? error.code : 0 }));
+    });
+});
+
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`\n========================================`);
-    console.log(`  NEXUS NODE V15.4 (IRON-PULSE-RAM)`);
-    console.log(`  Status: High-Frequency RAM Active`);
+    console.log(`  NEXUS NODE V15.5 (ROBUST-PULSE)`);
+    console.log(`  🛡️ KEY: ${NEXUS_KEY}`);
+    console.log(`  Target: ${currentTarget}`);
     console.log(`========================================\n`);
 });
