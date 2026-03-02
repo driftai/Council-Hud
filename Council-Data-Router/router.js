@@ -1,7 +1,6 @@
 ﻿const express = require('express');
 const cors = require('cors');
 const si = require('systeminformation');
-const wrap = require('./core/envelope');
 const fs = require('fs');
 const fsPromises = require('fs').promises;
 const path = require('path');
@@ -86,21 +85,41 @@ function getFileTree(dir, depth = 0) {
     } catch (e) { return []; }
 }
 
-function wrap(payload) {
+// FIXED: Defining wrap locally and removing the require conflict
+function wrap(payload, status = 'STABLE') {
     return {
         header: { 
             node_id: "WSL-ALVIN-01", 
             packet_id: uuidv4(), 
             timestamp: new Date().toISOString(), 
             schema_version: "2.1.0", 
-            status: "STABLE",
+            status: status,
             priority: "REALTIME"
         },
         payload
     };
 }
 
-// --- ENDPOINTS (V14.2 ZERO-CACHE) ---
+// ==========================================
+// 🛡️ THE NEXUS SHIELD
+// ==========================================
+const AUTH_KEY_PATH = path.join(__dirname, 'nexus.key');
+let NEXUS_KEY = "";
+if (fs.existsSync(AUTH_KEY_PATH)) {
+    NEXUS_KEY = fs.readFileSync(AUTH_KEY_PATH, 'utf8').trim();
+} else {
+    NEXUS_KEY = crypto.randomUUID();
+    fs.writeFileSync(AUTH_KEY_PATH, NEXUS_KEY);
+}
+
+const requireAuth = (req, res, next) => {
+    if (req.url === '/health' || req.url === '/' || req.url.includes('health')) return next();
+    const clientKey = req.headers['x-nexus-key'];
+    if (!clientKey || clientKey !== NEXUS_KEY) return res.status(401).json({ error: "UNAUTHORIZED" });
+    next();
+};
+
+// --- ENDPOINTS ---
 
 app.use((req, res, next) => {
     if (req.url.startsWith('/api/nexus')) req.url = req.url.replace('/api/nexus', '');
@@ -109,17 +128,14 @@ app.use((req, res, next) => {
 
 app.get(['/', '/health'], async (req, res) => {
     try {
-        // We call currentLoad() twice with a small gap to ensure we get a fresh measurement of change
-        const cpu = await si.currentLoad();
-        const [mem, temp, time] = await Promise.all([si.mem(), si.cpuTemperature(), si.time()]);
-        
+        const [cpu, mem, temp, time] = await Promise.all([si.currentLoad(), si.mem(), si.cpuTemperature(), si.time()]);
         const data = {
             status: "online",
             cpu_load: Math.round(cpu.currentLoad),
             ram_used: Math.round((mem.active / mem.total) * 100),
             cpu_temp: temp.main || 45,
             uptime: time.uptime,
-            protocol: "V14.2 Zero-Cache"
+            protocol: "V14.3 Zero-Cache-Fix"
         };
         res.json(wrap(data));
     } catch (e) { res.status(500).json({ error: "Fault" }); }
@@ -156,7 +172,7 @@ app.post(['/set-path', '/nexus/command', '/command'], requireAuth, (req, res) =>
     if (cmd === 'SET_PATH' || newPath) {
         currentTarget = translatePath(newPath);
         saveConfig(newPath);
-        console.log(`\n\x1b[33m[COMMAND]\x1b[0m Path Set: ${currentTarget}`);
+        console.log(`\x1b[33m[COMMAND]\x1b[0m Path Set: ${currentTarget}`);
         res.json({ status: "SUCCESS" });
     } else {
         res.status(400).json({ error: "Invalid Directive" });
@@ -167,7 +183,7 @@ app.post(['/read-file', '/read-local'], requireAuth, (req, res) => {
     const target = translatePath(req.body.path || req.body.filepath);
     try {
         const content = fs.readFileSync(target, 'utf8');
-        res.json({ content, path: target });
+        res.json(wrap({ content, path: target }));
     } catch (e) { res.status(404).json({ error: "Not Found" }); }
 });
 
@@ -190,7 +206,7 @@ app.post('/exec', requireAuth, (req, res) => {
 
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`\n========================================`);
-    console.log(`  NEXUS NODE V14.2 (ZERO-CACHE)`);
+    console.log(`  NEXUS NODE V14.3 (ZERO-CACHE-FIX)`);
     console.log(`  🛡️ KEY: ${NEXUS_KEY}`);
     console.log(`  Target: ${currentTarget}`);
     console.log(`========================================\n`);
