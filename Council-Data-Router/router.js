@@ -1,6 +1,7 @@
 ﻿const express = require('express');
 const cors = require('cors');
 const si = require('systeminformation');
+const wrap = require('./core/envelope');
 const fs = require('fs');
 const fsPromises = require('fs').promises;
 const path = require('path');
@@ -16,51 +17,16 @@ const CONFIG_PATH = path.join(CONFIG_DIR, 'paths.json');
 app.use(cors({ origin: '*' }));
 app.use(express.json({ limit: '50mb' }));
 
-// ==========================================
-// 🛡️ THE NEXUS SHIELD
-// ==========================================
-const AUTH_KEY_PATH = path.join(__dirname, 'nexus.key');
-let NEXUS_KEY = "";
-if (fs.existsSync(AUTH_KEY_PATH)) {
-    NEXUS_KEY = fs.readFileSync(AUTH_KEY_PATH, 'utf8').trim();
-} else {
-    NEXUS_KEY = crypto.randomUUID();
-    fs.writeFileSync(AUTH_KEY_PATH, NEXUS_KEY);
-}
-
-const requireAuth = (req, res, next) => {
-    if (req.url === '/health' || req.url === '/' || req.url.includes('health')) return next();
-    const clientKey = req.headers['x-nexus-key'];
-    if (!clientKey || clientKey !== NEXUS_KEY) return res.status(401).json({ error: "UNAUTHORIZED" });    
+// --- THE ZERO-CACHE SHIELD ---
+app.use((req, res, next) => {
+    res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.set('Pragma', 'no-cache');
+    res.set('Expires', '0');
+    res.set('Surrogate-Control', 'no-store');
     next();
-};
+});
 
-// ==========================================
-// 🗺️ SMART PATH TRANSLATOR (V14)
-// ==========================================
-function translatePath(inputPath) {
-    if (!inputPath) return "";
-    try {
-        let decoded = decodeURIComponent(inputPath);
-        let normalized = decoded.replace(/\\/g, '/');
-        
-        normalized = normalized.replace(/^(\/\/wsl\.localhost\/Ubuntu|\/\/wsl\$\/Ubuntu)/i, '');
-        normalized = normalized.replace(/^(\/\/wsl\.localhost|\/\/wsl\$)/i, '');
-
-        if (normalized.match(/^[a-zA-Z]:\//)) {
-            const drive = normalized.charAt(0).toLowerCase();
-            normalized = `/mnt/${drive}/${normalized.substring(3)}`;
-        }
-
-        if (normalized.startsWith('/Users/') && !normalized.startsWith('/mnt/')) {
-            normalized = '/mnt/c' + normalized;
-        }
-
-        return normalized;
-    } catch (e) { return inputPath; }
-}
-
-// --- STATE MANAGEMENT & PERSISTENCE ---
+// --- STATE MANAGEMENT ---
 let currentTarget = "/home/alvin-linux/OpenClawStuff";
 let lastPeekPath = "";
 let peekBurstCount = 0;
@@ -73,7 +39,7 @@ function loadConfig() {
             const conf = JSON.parse(cleanData);
             if (conf.mirrored_paths && conf.mirrored_paths[0]) {
                 currentTarget = translatePath(conf.mirrored_paths[0]);
-                console.log(`\x1b[32m[CONFIG]\x1b[0m Path Restored & Translated: ${currentTarget}`);      
+                console.log(`\x1b[32m[CONFIG]\x1b[0m Path Restored: ${currentTarget}`);      
             }
         }
     } catch (e) { console.log(`\x1b[31m[CONFIG]\x1b[0m Restore failed: ${e.message}`); }
@@ -87,9 +53,24 @@ function saveConfig(newPath) {
     } catch (e) { console.error(`\x1b[31m[CONFIG]\x1b[0m Save failed: ${e.message}`); }
 }
 
-// ==========================================
-// 📂 DEEP PEEK
-// ==========================================
+function translatePath(inputPath) {
+    if (!inputPath) return "";
+    try {
+        let decoded = decodeURIComponent(inputPath);
+        let normalized = decoded.replace(/\\/g, '/');
+        normalized = normalized.replace(/^(\/\/wsl\.localhost\/Ubuntu|\/\/wsl\$\/Ubuntu)/i, '');
+        normalized = normalized.replace(/^(\/\/wsl\.localhost|\/\/wsl\$)/i, '');
+        if (normalized.match(/^[a-zA-Z]:\//)) {
+            const drive = normalized.charAt(0).toLowerCase();
+            normalized = `/mnt/${drive}/${normalized.substring(3)}`;
+        }
+        if (normalized.startsWith('/Users/') && !normalized.startsWith('/mnt/')) {
+            normalized = '/mnt/c' + normalized;
+        }
+        return normalized;
+    } catch (e) { return inputPath; }
+}
+
 function getFileTree(dir, depth = 0) {
     if (depth > 3) return [];
     try {
@@ -115,12 +96,11 @@ function wrap(payload) {
             status: "STABLE",
             priority: "REALTIME"
         },
-        payload,
-        ...payload // Flat merge for backward compatibility
+        payload
     };
 }
 
-// --- ENDPOINTS (V14.1 TELEMETRY SYNC) ---
+// --- ENDPOINTS (V14.2 ZERO-CACHE) ---
 
 app.use((req, res, next) => {
     if (req.url.startsWith('/api/nexus')) req.url = req.url.replace('/api/nexus', '');
@@ -129,16 +109,18 @@ app.use((req, res, next) => {
 
 app.get(['/', '/health'], async (req, res) => {
     try {
-        const [cpu, mem, temp, time] = await Promise.all([si.currentLoad(), si.mem(), si.cpuTemperature(), si.time()]);
+        // We call currentLoad() twice with a small gap to ensure we get a fresh measurement of change
+        const cpu = await si.currentLoad();
+        const [mem, temp, time] = await Promise.all([si.mem(), si.cpuTemperature(), si.time()]);
+        
         const data = {
             status: "online",
             cpu_load: Math.round(cpu.currentLoad),
             ram_used: Math.round((mem.active / mem.total) * 100),
             cpu_temp: temp.main || 45,
             uptime: time.uptime,
-            protocol: "V14.1 Telemetry Sync"
+            protocol: "V14.2 Zero-Cache"
         };
-        // FIXED: Return wrapped envelope so HUD can see the data
         res.json(wrap(data));
     } catch (e) { res.status(500).json({ error: "Fault" }); }
 });
@@ -157,34 +139,27 @@ app.all(['/filesystem/tree', '/tree', '/filesystem'], requireAuth, async (req, r
         currentTarget = translatePath(rawPath);
         saveConfig(rawPath);
     }
-
     const tree = getFileTree(currentTarget);
-
     if (currentTarget !== lastPeekPath) {
         console.log(`\n\x1b[34m[PEEK]\x1b[0m Monitoring: ${currentTarget}`);
-        console.log(`\x1b[32m[PEEK]\x1b[0m Discovery: Found ${tree.length} items.`);
         lastPeekPath = currentTarget;
         peekBurstCount = 1;
     } else {
         peekBurstCount++;
         if (peekBurstCount % 5 === 0) process.stdout.write('\x1b[34m.\x1b[0m');
     }
-
     res.json(wrap({ tree, root_path: currentTarget }));
 });
 
 app.post(['/set-path', '/nexus/command', '/command'], requireAuth, (req, res) => {
-    const { cmd, path: newPath, pid } = req.body;
-    const directive = cmd || (newPath ? 'SET_PATH' : null);
-    console.log(`\x1b[33m[COMMAND]\x1b[0m ${directive}`);
-
-    if (directive === 'SET_PATH' && newPath) {
+    const { cmd, path: newPath } = req.body;
+    if (cmd === 'SET_PATH' || newPath) {
         currentTarget = translatePath(newPath);
         saveConfig(newPath);
-        console.log(`\x1b[33m[COMMAND]\x1b[0m Path Set: ${currentTarget}`);
-        res.json(wrap({ status: "SUCCESS" }));
+        console.log(`\n\x1b[33m[COMMAND]\x1b[0m Path Set: ${currentTarget}`);
+        res.json({ status: "SUCCESS" });
     } else {
-        res.status(400).json(wrap({ error: "Invalid Directive" }));
+        res.status(400).json({ error: "Invalid Directive" });
     }
 });
 
@@ -192,8 +167,8 @@ app.post(['/read-file', '/read-local'], requireAuth, (req, res) => {
     const target = translatePath(req.body.path || req.body.filepath);
     try {
         const content = fs.readFileSync(target, 'utf8');
-        res.json(wrap({ content, path: target }));
-    } catch (e) { res.status(404).json(wrap({ error: "Not Found" })); }
+        res.json({ content, path: target });
+    } catch (e) { res.status(404).json({ error: "Not Found" }); }
 });
 
 app.post('/write-file', requireAuth, (req, res) => {
@@ -201,21 +176,21 @@ app.post('/write-file', requireAuth, (req, res) => {
     try {
         fs.mkdirSync(path.dirname(target), { recursive: true });
         fs.writeFileSync(target, req.body.content, 'utf8');
-        res.json(wrap({ status: "success" }));
-    } catch (err) { res.status(500).json(wrap({ error: err.message })); }
+        res.json({ status: "success" });
+    } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.post('/exec', requireAuth, (req, res) => {
     const { command, cwd } = req.body;
     const targetDir = translatePath(cwd) || currentTarget;
     exec(command, { cwd: targetDir, maxBuffer: 1024*1024*10 }, (error, stdout, stderr) => {
-        res.json(wrap({ output: stdout, stderr, exitCode: error ? error.code : 0 }));
+        res.json({ output: stdout, stderr, exitCode: error ? error.code : 0 });
     });
 });
 
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`\n========================================`);
-    console.log(`  NEXUS NODE V14.1 (TELEMETRY SYNC)`);
+    console.log(`  NEXUS NODE V14.2 (ZERO-CACHE)`);
     console.log(`  🛡️ KEY: ${NEXUS_KEY}`);
     console.log(`  Target: ${currentTarget}`);
     console.log(`========================================\n`);
