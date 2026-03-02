@@ -12,10 +12,12 @@ const app = express();
 const PORT = 3001;
 const CONFIG_DIR = path.join(__dirname, 'config');
 const CONFIG_PATH = path.join(CONFIG_DIR, 'paths.json');
+const PS_PROBE = path.join(__dirname, 'utils', 'get_hardware.ps1');
 
 app.use(cors({ origin: '*' }));
 app.use(express.json({ limit: '50mb' }));
 
+// --- THE ZERO-CACHE SHIELD ---
 app.use((req, res, next) => {
     res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
     res.set('Pragma', 'no-cache');
@@ -27,20 +29,15 @@ app.use((req, res, next) => {
 let currentTarget = "/home/alvin-linux/OpenClawStuff";
 let lastPeekPath = "";
 let peekBurstCount = 0;
-let lastStats = { cpu: 5, ram: 40, temp: 44.0, uptime: 0 };
 
-function loadConfig() {
-    try {
-        if (fs.existsSync(CONFIG_PATH)) {
-            const rawData = fs.readFileSync(CONFIG_PATH, 'utf8');
-            const cleanData = rawData.replace(/^[^{]*/, ''); 
-            const conf = JSON.parse(cleanData);
-            if (conf.mirrored_paths && conf.mirrored_paths[0]) {
-                currentTarget = translatePath(conf.mirrored_paths[0]);
-            }
-        }
-    } catch (e) {}
-}
+// THE PULSE STATE
+let LATEST_STATS = { 
+    cpu: 5, 
+    ram: 40, 
+    temp: 44.0, 
+    uptime: 0, 
+    last_sync: 0 
+};
 
 function translatePath(inputPath) {
     if (!inputPath) return "";
@@ -60,6 +57,18 @@ function translatePath(inputPath) {
     } catch (e) { return inputPath; }
 }
 
+function loadConfig() {
+    try {
+        if (fs.existsSync(CONFIG_PATH)) {
+            const rawData = fs.readFileSync(CONFIG_PATH, 'utf8');
+            const cleanData = rawData.replace(/^[^{]*/, ''); 
+            const conf = JSON.parse(cleanData);
+            if (conf.mirrored_paths && conf.mirrored_paths[0]) {
+                currentTarget = translatePath(conf.mirrored_paths[0]);
+            }
+        }
+    } catch (e) {}
+}
 loadConfig();
 
 function saveConfig(newPath) {
@@ -88,75 +97,60 @@ const requireAuth = (req, res, next) => {
     next();
 };
 
-function getFileTree(dir, depth = 0) {
-    if (depth > 3) return [];
+// ==========================================
+// 💓 THE PULSE ENGINE (Background Collector)
+// ==========================================
+function updateHardwarePulse() {
     try {
-        const dirents = fs.readdirSync(dir, { withFileTypes: true });
-        return dirents.map((dirent) => {
-            const res = path.join(dir, dirent.name);
-            if (['node_modules', '.git', '.next', '.vs', 'dist'].includes(dirent.name)) return null;
-            if (dirent.isDirectory()) {
-                return { name: dirent.name, type: 'folder', path: res, children: getFileTree(res, depth + 1) };
-            }
-            return { name: dirent.name, type: 'file', path: res };
-        }).filter(Boolean);
-    } catch (e) { return []; }
-}
-
-function getWindowsStats() {
-    try {
-        const ps = "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -Command";
+        // Translate the local .ps1 path to its /mnt/c equivalent for the bridge
+        const winPath = PS_PROBE.replace('/home/alvin-linux/', 'C:/Users/alvin-linux/').replace(/\//g, '\\');
+        // Actually, since we know it's in the repo, we can find it via /mnt/c/Users/alvin/...
+        // Let's use the known absolute path mapping for speed
+        const wslPath = PS_PROBE;
+        const cmd = `/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -File "${wslPath}"`;
         
-        // SINGLE CALL OPTIMIZATION: Pull all data in one pipe
-        const psCommand = `
-            $cpu = (Get-CimInstance Win32_Processor).LoadPercentage;
-            $mem = Get-CimInstance Win32_OperatingSystem | Select-Object TotalVisibleMemorySize, FreePhysicalMemory;
-            $uptime = [math]::Round(((Get-Date) - $mem.LastBootUpTime).TotalSeconds);
-            if (!$uptime) { $uptime = [math]::Round(((Get-Date) - (Get-CimInstance Win32_OperatingSystem).LastBootUpTime).TotalSeconds) };
-            $ram = [math]::Round((($mem.TotalVisibleMemorySize - $mem.FreePhysicalMemory) / $mem.TotalVisibleMemorySize) * 100);
+        const raw = execSync(cmd, { stdio: ['pipe', 'pipe', 'ignore'] }).toString().trim();
+        const [cpu, ram, uptime] = raw.split('|');
+        
+        if (cpu !== undefined) {
+            LATEST_STATS.cpu = Math.round(parseFloat(cpu)) || 5;
+            LATEST_STATS.ram = Math.round(parseFloat(ram)) || LATEST_STATS.ram;
+            LATEST_STATS.uptime = parseFloat(uptime) || LATEST_STATS.uptime;
             
-            Write-Output "$cpu|$ram|$uptime"
-        `.replace(/\n/g, ' ').trim();
-
-        const raw = execSync(`${ps} "${psCommand}"`, { stdio: ['pipe', 'pipe', 'ignore'] }).toString().trim();
-        const parts = raw.split('|');
-        
-        if (parts.length === 3) {
-            lastStats.cpu = Math.round(parseFloat(parts[0])) || lastStats.cpu;
-            lastStats.ram = Math.round(parseFloat(parts[1])) || lastStats.ram;
-            lastStats.uptime = parseFloat(parts[2]) || lastStats.uptime;
+            // Jittered Temp
+            const jitter = (Math.random() * 1.2 - 0.6).toFixed(1);
+            LATEST_STATS.temp = (44.3 + parseFloat(jitter)).toFixed(1);
+            LATEST_STATS.last_sync = Date.now();
         }
-
-        // Temp Jitter
-        const jitter = (Math.random() * 1.2 - 0.6).toFixed(1);
-        lastStats.temp = (44.3 + parseFloat(jitter)).toFixed(1);
-
-        return lastStats;
     } catch (e) {
-        return lastStats;
+        // Silent fail, use last known good stats
     }
 }
 
-// --- ENDPOINTS (V15.6 PURE-IRON) ---
+// Start the Pulse Loop (Every 2.5 seconds)
+setInterval(updateHardwarePulse, 2500);
+updateHardwarePulse(); // Initial fire
 
-app.get(['/', '/health'], async (req, res) => {
-    try {
-        const stats = getWindowsStats();
-        res.json(wrap({
-            status: "online",
-            cpu_load: stats.cpu,
-            ram_used: stats.ram,
-            cpu_temp: stats.temp,
-            uptime: stats.uptime,
-            protocol: "V15.6 Pure-Iron"
-        }));
-    } catch (e) { res.status(500).json({ error: "Fault" }); }
+// --- ENDPOINTS (V16.0 PULSE ENGINE) ---
+
+app.get(['/', '/health'], (req, res) => {
+    res.json(wrap({
+        status: "online",
+        cpu_load: LATEST_STATS.cpu,
+        ram_used: LATEST_STATS.ram,
+        cpu_temp: LATEST_STATS.temp,
+        uptime: LATEST_STATS.uptime,
+        last_sync: LATEST_STATS.last_sync,
+        protocol: "V16.0 Pulse Engine"
+    }));
 });
 
 app.get('/graph', requireAuth, async (req, res) => {
     try {
         const processes = await si.processes();
-        const nodes = processes.list.sort((a, b) => b.cpu - a.cpu).slice(0, 10).map(p => ({ id: p.pid, name: p.name, type: 'PROCESS', usage: p.cpu }));
+        const nodes = processes.list.sort((a, b) => b.cpu - a.cpu).slice(0, 10).map(p => ({ 
+            id: p.pid, name: p.name, type: 'PROCESS', usage: p.cpu 
+        }));
         res.json(wrap({ nodes, total_threads: processes.all }));
     } catch (e) { res.status(500).json({ error: "Graph Fault" }); }
 });
@@ -182,7 +176,7 @@ app.all(['/filesystem/tree', '/tree', '/filesystem'], requireAuth, async (req, r
         } else {
             peekBurstCount++;
             if (peekBurstCount % 10 === 0) {
-                process.stdout.write(`\x1b[36m[${lastStats.cpu}%|${lastStats.ram}%]\x1b[0m`); 
+                process.stdout.write(`\x1b[36m[${LATEST_STATS.cpu}%|${LATEST_STATS.ram}%]\x1b[0m`); 
             } else {
                 process.stdout.write('\x1b[34m.\x1b[0m'); 
             }
@@ -230,8 +224,8 @@ app.post('/exec', requireAuth, (req, res) => {
 
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`\n========================================`);
-    console.log(`  NEXUS NODE V15.6 (PURE-IRON)`);
+    console.log(`  NEXUS NODE V16.0 (PULSE ENGINE)`);
     console.log(`  🛡️ KEY: ${NEXUS_KEY}`);
-    console.log(`  Target: ${currentTarget}`);
+    console.log(`  Status: Real-Time Heartbeat Active`);
     console.log(`========================================\n`);
 });
