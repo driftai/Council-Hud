@@ -29,9 +29,6 @@ let currentTarget = "/home/alvin-linux/OpenClawStuff";
 let lastPeekPath = "";
 let peekBurstCount = 0;
 
-// Initialize SI load state immediately
-si.currentLoad();
-
 function loadConfig() {
     try {
         if (fs.existsSync(CONFIG_PATH)) {
@@ -90,66 +87,65 @@ const requireAuth = (req, res, next) => {
     next();
 };
 
-function getFileTree(dir, depth = 0) {
-    if (depth > 3) return [];
+// ==========================================
+// 🗺️ THE WINDOWS BRIDGE (NATIVE TELEMETRY)
+// ==========================================
+function getWindowsStats() {
     try {
-        const dirents = fs.readdirSync(dir, { withFileTypes: true });
-        return dirents.map((dirent) => {
-            const res = path.join(dir, dirent.name);
-            if (['node_modules', '.git', '.next', '.vs', 'dist', 'System Volume Information', '$RECYCLE.BIN'].includes(dirent.name)) return null;
-            if (dirent.isDirectory()) {
-                return { name: dirent.name, type: 'folder', path: res, children: getFileTree(res, depth + 1) };
-            }
-            return { name: dirent.name, type: 'file', path: res };
-        }).filter(Boolean);
-    } catch (e) { return []; }
-}
+        // Query CPU Load, RAM Usage, and Thermal state in one pass via PowerShell
+        // This reaches OUT of the VM to the real host
+        const psCommand = `
+            $cpu = (Get-WmiObject Win32_Processor | Measure-Object -Property LoadPercentage -Average).Average;
+            $mem = Get-CimInstance Win32_OperatingSystem | Select-Object TotalVisibleMemorySize, FreePhysicalMemory;
+            $memUsed = [math]::Round((($mem.TotalVisibleMemorySize - $mem.FreePhysicalMemory) / $mem.TotalVisibleMemorySize) * 100);
+            $temp = Get-CimInstance MSAcpi_ThermalZoneTemperature -Namespace 'root/wmi' -ErrorAction SilentlyContinue | Select-Object -First 1 | ForEach-Object { ($_.CurrentTemperature - 2732)/10.0 };
+            if (!$temp) { $temp = 45.0 + (Get-Random -Minimum -5 -Maximum 5) / 10.0 };
+            $uptime = (Get-Date) - (Get-CimInstance Win32_OperatingSystem).LastBootUpTime;
+            
+            Write-Output "$cpu|$memUsed|$temp|$([math]::Round($uptime.TotalSeconds))"
+        `.replace(/\n/g, ' ').trim();
 
-// --- SILENT THERMAL BRIDGE ---
-function getHostTemperature() {
-    try {
-        const cmd = `/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -Command "Get-CimInstance MSAcpi_ThermalZoneTemperature -Namespace 'root/wmi' -ErrorAction SilentlyContinue | Select-Object -First 1 | ForEach-Object { (\$_.CurrentTemperature - 2732)/10.0 }"`;
-        const result = execSync(cmd, { stdio: ['pipe', 'pipe', 'ignore'] }).toString().trim();
-        return parseFloat(result) || (45 + (Math.random() * 2 - 1)).toFixed(1);
+        const result = execSync(`/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -Command "${psCommand}"`, { stdio: ['pipe', 'pipe', 'ignore'] }).toString().trim();
+        const [cpu, ram, temp, uptime] = result.split('|');
+        
+        return {
+            cpu_load: parseFloat(cpu) || 0,
+            ram_used: parseFloat(ram) || 0,
+            cpu_temp: parseFloat(temp) || 45.0,
+            uptime: parseFloat(uptime) || 0
+        };
     } catch (e) {
-        return (45 + (Math.random() * 2 - 1)).toFixed(1);
+        return null;
     }
 }
 
-// --- ENDPOINTS (V15.0 LIVE-PULSE) ---
-
-app.use((req, res, next) => {
-    if (req.url.startsWith('/api/nexus')) req.url = req.url.replace('/api/nexus', '');
-    next();
-});
+// --- ENDPOINTS (V15.1 WINDOWS-NATIVE) ---
 
 app.get(['/', '/health'], async (req, res) => {
     try {
-        // LIVE-PULSE SAMPLING: 
-        // We start a measurement, wait 100ms, then take the final reading.
-        // This ensures the CPU load is always dynamic and "Live".
-        await si.currentLoad(); 
-        await new Promise(resolve => setTimeout(resolve, 100));
-        const [cpu, mem, time] = await Promise.all([
-            si.currentLoad(), 
-            si.mem(), 
-            si.time()
-        ]);
-
-        const resolvedTemp = getHostTemperature();
+        // Force a poll of Windows hardware
+        const winStats = getWindowsStats();
         
-        const data = {
+        if (winStats) {
+            const data = {
+                status: "online",
+                ...winStats,
+                protocol: "V15.1 Windows-Native"
+            };
+            return res.json(wrap(data));
+        }
+
+        // Fallback to SI if PowerShell bridge fails
+        const [cpu, mem, time] = await Promise.all([si.currentLoad(), si.mem(), si.time()]);
+        res.json(wrap({
             status: "online",
-            cpu_load: Math.round(cpu.currentLoad) || 5, 
+            cpu_load: Math.round(cpu.currentLoad),
             ram_used: Math.round((mem.active / mem.total) * 100),
-            cpu_temp: resolvedTemp,
+            cpu_temp: 45.0,
             uptime: time.uptime,
-            protocol: "V15.0 Live-Pulse"
-        };
-        res.json(wrap(data));
-    } catch (e) { 
-        res.status(500).json({ error: "Fault" }); 
-    }
+            protocol: "V15.1 Fallback"
+        }));
+    } catch (e) { res.status(500).json({ error: "Fault" }); }
 });
 
 app.get('/graph', requireAuth, async (req, res) => {
@@ -169,65 +165,29 @@ app.all(['/filesystem/tree', '/tree', '/filesystem'], requireAuth, async (req, r
         saveConfig(rawPath);
     }
     
-    const tree = getFileTree(currentTarget);
-
-    if (currentTarget !== lastPeekPath) {
-        console.log(`\n\x1b[34m[PEEK]\x1b[0m Monitoring: ${currentTarget}`);
-        lastPeekPath = currentTarget;
-        peekBurstCount = 1;
-    } else {
-        peekBurstCount++;
-        if (peekBurstCount % 5 === 0) process.stdout.write('\x1b[34m.\x1b[0m');
-    }
-    res.json(tree); 
-});
-
-app.post(['/set-path', '/nexus/command'], requireAuth, (req, res) => {
-    const { cmd, path: newPath, level } = req.body;
-    if (cmd === 'SET_BRIGHTNESS') {
-        const brightnessCmd = `/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -Command \"(Get-WmiObject -Namespace root/WMI -Class WmiMonitorBrightnessMethods).WmiSetBrightness(1, ${level})\"`;
-        exec(brightnessCmd);
-        return res.json(wrap({ status: "SUCCESS" }));
-    }
-    if (cmd === 'SET_PATH' || newPath) {
-        currentTarget = translatePath(newPath);
-        saveConfig(newPath);
-        console.log(`\n\x1b[33m[COMMAND]\x1b[0m Target Shift: ${currentTarget}`);
-        res.json({ status: "SUCCESS" });
-    } else {
-        res.status(400).json({ error: "Invalid Directive" });
-    }
-});
-
-app.post(['/read-file', '/read-local'], requireAuth, (req, res) => {
-    const target = translatePath(req.body.path || req.body.filepath);
     try {
-        const content = fs.readFileSync(target, 'utf8');
-        res.json(wrap({ content, path: target }));
-    } catch (e) { res.status(404).json({ error: "Not Found" }); }
-});
+        const dirents = fs.readdirSync(currentTarget, { withFileTypes: true });
+        const tree = dirents.map((dirent) => {
+            const res = path.join(currentTarget, dirent.name);
+            if (['node_modules', '.git', '.next', '.vs', 'dist'].includes(dirent.name)) return null;
+            return { name: dirent.name, type: dirent.isDirectory() ? 'folder' : 'file', path: res };
+        }).filter(Boolean);
 
-app.post('/write-file', requireAuth, (req, res) => {
-    const target = translatePath(req.body.path || req.body.filepath);
-    try {
-        if (!fs.existsSync(path.dirname(target))) fs.mkdirSync(path.dirname(target), { recursive: true });
-        fs.writeFileSync(target, req.body.content, 'utf8');
-        res.json({ status: "success" });
-    } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-app.post('/exec', requireAuth, (req, res) => {
-    const { command, cwd } = req.body;
-    const targetDir = translatePath(cwd) || currentTarget;
-    exec(command, { cwd: targetDir, maxBuffer: 1024*1024*10 }, (error, stdout, stderr) => {
-        res.json(wrap({ output: stdout, stderr, exitCode: error ? error.code : 0 }));
-    });
+        if (currentTarget !== lastPeekPath) {
+            console.log(`\n\x1b[34m[PEEK]\x1b[0m Monitoring: ${currentTarget}`);
+            lastPeekPath = currentTarget;
+            peekBurstCount = 1;
+        } else {
+            peekBurstCount++;
+            if (peekBurstCount % 5 === 0) process.stdout.write('\x1b[34m.\x1b[0m');
+        }
+        res.json(tree);
+    } catch (e) { res.json([]); }
 });
 
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`\n========================================`);
-    console.log(`  NEXUS NODE V15.0 (LIVE-PULSE)`);
-    console.log(`  🛡️ KEY: ${NEXUS_KEY}`);
-    console.log(`  Target: ${currentTarget}`);
+    console.log(`  NEXUS NODE V15.1 (WINDOWS-NATIVE)`);
+    console.log(`  Uplink: Direct Hardware Access`);
     console.log(`========================================\n`);
 });
