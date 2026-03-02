@@ -1,0 +1,19 @@
+{
+  "name": "council-data-router",
+  "version": "8.0.0",
+  "description": "Nexus Node Local Router - Hardened",
+  "main": "router.js",
+  "dependencies": {
+    "chokidar": "^5.0.0",
+    "cors": "^2.8.6",
+    "express": "^4.22.1",
+    "systeminformation": "^5.31.1",
+    "uuid": "^13.0.0"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC"
+}

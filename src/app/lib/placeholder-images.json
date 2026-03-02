@@ -1,0 +1,10 @@
+{
+  "placeholderImages": [
+    {
+      "id": "neural-pattern",
+      "description": "Abstract neural network pattern",
+      "imageUrl": "https://picsum.photos/seed/42/800/600",
+      "imageHint": "neural network"
+    }
+  ]
+}
