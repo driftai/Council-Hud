@@ -28,6 +28,7 @@ app.use((req, res, next) => {
 let currentTarget = "/home/alvin-linux/OpenClawStuff";
 let lastPeekPath = "";
 let peekBurstCount = 0;
+let lastStats = { cpu: 0, ram: 0, temp: 45 };
 
 function loadConfig() {
     try {
@@ -81,7 +82,7 @@ if (fs.existsSync(AUTH_KEY_PATH)) {
 }
 
 const requireAuth = (req, res, next) => {
-    if (req.url === '/health' || req.url === '/') return next();
+    if (req.url === '/health' || req.url === '/' || req.url.includes('health')) return next();
     const clientKey = req.headers['x-nexus-key'];
     if (!clientKey || clientKey !== NEXUS_KEY) return res.status(401).json({ error: "UNAUTHORIZED" });
     next();
@@ -92,8 +93,6 @@ const requireAuth = (req, res, next) => {
 // ==========================================
 function getWindowsStats() {
     try {
-        // Query CPU Load, RAM Usage, and Thermal state in one pass via PowerShell
-        // This reaches OUT of the VM to the real host
         const psCommand = `
             $cpu = (Get-WmiObject Win32_Processor | Measure-Object -Property LoadPercentage -Average).Average;
             $mem = Get-CimInstance Win32_OperatingSystem | Select-Object TotalVisibleMemorySize, FreePhysicalMemory;
@@ -101,17 +100,22 @@ function getWindowsStats() {
             $temp = Get-CimInstance MSAcpi_ThermalZoneTemperature -Namespace 'root/wmi' -ErrorAction SilentlyContinue | Select-Object -First 1 | ForEach-Object { ($_.CurrentTemperature - 2732)/10.0 };
             if (!$temp) { $temp = 45.0 + (Get-Random -Minimum -5 -Maximum 5) / 10.0 };
             $uptime = (Get-Date) - (Get-CimInstance Win32_OperatingSystem).LastBootUpTime;
-            
             Write-Output "$cpu|$memUsed|$temp|$([math]::Round($uptime.TotalSeconds))"
         `.replace(/\n/g, ' ').trim();
 
         const result = execSync(`/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -Command "${psCommand}"`, { stdio: ['pipe', 'pipe', 'ignore'] }).toString().trim();
         const [cpu, ram, temp, uptime] = result.split('|');
         
+        lastStats = { 
+            cpu: Math.round(parseFloat(cpu)) || 5, 
+            ram: Math.round(parseFloat(ram)) || 0, 
+            temp: parseFloat(temp) || 45.0 
+        };
+
         return {
-            cpu_load: parseFloat(cpu) || 0,
-            ram_used: parseFloat(ram) || 0,
-            cpu_temp: parseFloat(temp) || 45.0,
+            cpu_load: lastStats.cpu,
+            ram_used: lastStats.ram,
+            cpu_temp: lastStats.temp,
             uptime: parseFloat(uptime) || 0
         };
     } catch (e) {
@@ -119,23 +123,14 @@ function getWindowsStats() {
     }
 }
 
-// --- ENDPOINTS (V15.1 WINDOWS-NATIVE) ---
+// --- ENDPOINTS (V15.2 CONSOLE MIRROR) ---
 
 app.get(['/', '/health'], async (req, res) => {
     try {
-        // Force a poll of Windows hardware
         const winStats = getWindowsStats();
-        
         if (winStats) {
-            const data = {
-                status: "online",
-                ...winStats,
-                protocol: "V15.1 Windows-Native"
-            };
-            return res.json(wrap(data));
+            return res.json(wrap({ status: "online", ...winStats, protocol: "V15.2 Mirror" }));
         }
-
-        // Fallback to SI if PowerShell bridge fails
         const [cpu, mem, time] = await Promise.all([si.currentLoad(), si.mem(), si.time()]);
         res.json(wrap({
             status: "online",
@@ -143,19 +138,9 @@ app.get(['/', '/health'], async (req, res) => {
             ram_used: Math.round((mem.active / mem.total) * 100),
             cpu_temp: 45.0,
             uptime: time.uptime,
-            protocol: "V15.1 Fallback"
+            protocol: "V15.2 Fallback"
         }));
     } catch (e) { res.status(500).json({ error: "Fault" }); }
-});
-
-app.get('/graph', requireAuth, async (req, res) => {
-    try {
-        const processes = await si.processes();
-        const nodes = processes.list.sort((a, b) => b.cpu - a.cpu).slice(0, 10).map(p => ({ 
-            id: p.pid, name: p.name, type: 'PROCESS', usage: p.cpu 
-        }));
-        res.json(wrap({ nodes, total_threads: processes.all }));
-    } catch (e) { res.status(500).json({ error: "Graph Fault" }); }
 });
 
 app.all(['/filesystem/tree', '/tree', '/filesystem'], requireAuth, async (req, res) => {
@@ -173,21 +158,45 @@ app.all(['/filesystem/tree', '/tree', '/filesystem'], requireAuth, async (req, r
             return { name: dirent.name, type: dirent.isDirectory() ? 'folder' : 'file', path: res };
         }).filter(Boolean);
 
+        // CONSOLE MIRROR: Show hardware stats in the PEEK log
         if (currentTarget !== lastPeekPath) {
             console.log(`\n\x1b[34m[PEEK]\x1b[0m Monitoring: ${currentTarget}`);
+            console.log(`\x1b[32m[STATS]\x1b[0m CPU: ${lastStats.cpu}% | RAM: ${lastStats.ram}% | TEMP: ${lastStats.temp}°C`);
             lastPeekPath = currentTarget;
             peekBurstCount = 1;
         } else {
             peekBurstCount++;
-            if (peekBurstCount % 5 === 0) process.stdout.write('\x1b[34m.\x1b[0m');
+            // Every 10 pulses, show a mini telemetry update in the terminal
+            if (peekBurstCount % 10 === 0) {
+                process.stdout.write(`\x1b[36m[${lastStats.cpu}%|${lastStats.ram}%]\x1b[0m`); 
+            } else {
+                process.stdout.write('\x1b[34m.\x1b[0m'); 
+            }
         }
         res.json(tree);
     } catch (e) { res.json([]); }
 });
 
+app.post(['/set-path', '/nexus/command'], requireAuth, (req, res) => {
+    const { cmd, path: newPath, level } = req.body;
+    if (cmd === 'SET_BRIGHTNESS') {
+        const brightnessCmd = `/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -Command \"(Get-WmiObject -Namespace root/WMI -Class WmiMonitorBrightnessMethods).WmiSetBrightness(1, ${level})\"`;
+        exec(brightnessCmd);
+        return res.json(wrap({ status: "SUCCESS" }));
+    }
+    if (cmd === 'SET_PATH' || newPath) {
+        currentTarget = translatePath(newPath);
+        saveConfig(newPath);
+        console.log(`\n\x1b[33m[COMMAND]\x1b[0m Target Shift: ${currentTarget}`);
+        res.json({ status: "SUCCESS" });
+    } else {
+        res.status(400).json({ error: "Invalid Directive" });
+    }
+});
+
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`\n========================================`);
-    console.log(`  NEXUS NODE V15.1 (WINDOWS-NATIVE)`);
+    console.log(`  NEXUS NODE V15.2 (CONSOLE MIRROR)`);
     console.log(`  Uplink: Direct Hardware Access`);
     console.log(`========================================\n`);
 });
