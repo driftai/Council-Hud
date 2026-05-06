@@ -8,7 +8,7 @@ import { FileWatcher } from "@/components/dashboard/FileWatcher";
 import { NexusLogs } from "@/components/dashboard/NexusLogs";
 import { NeuralCommand } from "@/components/dashboard/NeuralCommand";
 import { DashboardCard } from "@/components/dashboard/DashboardCard";
-import { Shield, Zap, Bell, Link2, Loader2, Cpu, Lock, Unlock, Radio, X, FileCode, RefreshCcw, Signal, SignalHigh, SignalLow, Sparkles, Key } from "lucide-react";
+import { Shield, Zap, Bell, Link2, Loader2, Cpu, Lock, Unlock, Radio, X, FileCode, RefreshCcw, Signal, SignalHigh, SignalLow, Sparkles, Key, Edit3, Save, Undo2, AlertTriangle } from "lucide-react";
 import { useNexus } from "@/providers/NexusProvider";
 import { useState, useEffect } from "react";
 import { cn } from "@/lib/utils";
@@ -24,12 +24,14 @@ import {
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { Textarea } from "@/components/ui/textarea";
 
 export default function Home() {
   const {
     state,
     fileContent,
     setFileContent,
+    writeFile,
     consecutiveFailures,
     nexusKey,
     updateKey,
@@ -45,6 +47,10 @@ export default function Home() {
   const [isOpen, setIsOpen] = useState(false);
   const [isTurboSyncing, setIsTurboSyncing] = useState(false);
   const [now, setNow] = useState(Date.now());
+  const [isEditingFile, setIsEditingFile] = useState(false);
+  const [draftFileContent, setDraftFileContent] = useState("");
+  const [isSavingFile, setIsSavingFile] = useState(false);
+  const [fileEditorError, setFileEditorError] = useState<string | null>(null);
 
   useEffect(() => {
     setTempUrl(url);
@@ -55,6 +61,19 @@ export default function Home() {
     const interval = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(interval);
   }, []);
+
+  useEffect(() => {
+    if (!fileContent) {
+      setDraftFileContent("");
+      setIsEditingFile(false);
+      setFileEditorError(null);
+      return;
+    }
+
+    setDraftFileContent(fileContent.content);
+    setIsEditingFile(false);
+    setFileEditorError(null);
+  }, [fileContent?.path, fileContent?.content]);
 
   const handleSave = () => {
     updateUrl(tempUrl);
@@ -72,6 +91,39 @@ export default function Home() {
     }
   };
 
+  const handleCloseFileInspector = () => {
+    setFileContent(null);
+  };
+
+  const handleStartFileEdit = () => {
+    if (!fileContent) return;
+    setDraftFileContent(fileContent.content);
+    setFileEditorError(null);
+    setIsEditingFile(true);
+  };
+
+  const handleCancelFileEdit = () => {
+    setDraftFileContent(fileContent?.content || "");
+    setFileEditorError(null);
+    setIsEditingFile(false);
+  };
+
+  const handleSaveFileEdit = async () => {
+    if (!fileContent || isSavingFile) return;
+
+    setIsSavingFile(true);
+    setFileEditorError(null);
+    try {
+      await writeFile(fileContent.path, draftFileContent);
+      setFileContent({ path: fileContent.path, content: draftFileContent });
+      setIsEditingFile(false);
+    } catch (error: any) {
+      setFileEditorError(error?.message || "File write failed.");
+    } finally {
+      setIsSavingFile(false);
+    }
+  };
+
   const showOverlay = state === "HANDSHAKE" || (state === "SYNCING" && consecutiveFailures > 0);
   const lastPacketAge = lastUpdate ? Math.max(0, Math.floor((now - lastUpdate) / 1000)) : null;
   const cpuLoad = systemHealth?.cpu_load ?? "--";
@@ -83,6 +135,7 @@ export default function Home() {
   const uplinkLabel = isLocalProxy
     ? "LOCAL_NEXUS_PROXY"
     : url.replace("https://", "").replace("http://", "");
+  const fileHasUnsavedChanges = !!fileContent && draftFileContent !== fileContent.content;
 
   return (
     <main className="min-h-screen bg-[#020617] text-slate-100 selection:bg-cyan-500/30 overflow-x-hidden">
@@ -117,17 +170,75 @@ export default function Home() {
                   <p className="text-[10px] font-mono text-muted-foreground truncate max-w-[500px]">{fileContent.path}</p>
                 </div>
               </div>
-              <Button variant="ghost" size="icon" onClick={() => setFileContent(null)} className="hover:bg-white/5">
+              <Button variant="ghost" size="icon" onClick={handleCloseFileInspector} className="hover:bg-white/5">
                 <X className="w-5 h-5" />
               </Button>
             </div>
-            <ScrollArea className="flex-1 p-6 bg-black/40">
-              <pre className="font-mono text-xs text-slate-300 sliding-relaxed whitespace-pre-wrap">
-                {fileContent.content}
-              </pre>
-            </ScrollArea>
-            <div className="p-4 border-t border-white/5 flex justify-end">
-              <p className="text-[9px] font-mono text-muted-foreground uppercase">Buffer Security: Max 50KB Transmitted</p>
+            {isEditingFile ? (
+              <div className="flex-1 bg-black/40 p-4">
+                <Textarea
+                  value={draftFileContent}
+                  onChange={(event) => setDraftFileContent(event.target.value)}
+                  spellCheck={false}
+                  className="h-full min-h-full resize-none border-white/10 bg-black/60 font-mono text-xs text-slate-200 focus-visible:ring-primary"
+                />
+              </div>
+            ) : (
+              <ScrollArea className="flex-1 p-6 bg-black/40">
+                <pre className="font-mono text-xs text-slate-300 sliding-relaxed whitespace-pre-wrap">
+                  {fileContent.content}
+                </pre>
+              </ScrollArea>
+            )}
+            <div className="p-4 border-t border-white/5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <div className="min-w-0">
+                {fileEditorError ? (
+                  <p className="flex items-center gap-2 text-[9px] font-mono uppercase text-destructive">
+                    <AlertTriangle className="h-3 w-3 shrink-0" />
+                    <span className="truncate">{fileEditorError}</span>
+                  </p>
+                ) : (
+                  <p className="text-[9px] font-mono text-muted-foreground uppercase">
+                    {isEditingFile
+                      ? fileHasUnsavedChanges ? "Unsaved Edits Pending" : "Edit Buffer Clean"
+                      : "Buffer Security: Max 50KB Transmitted"}
+                  </p>
+                )}
+              </div>
+              <div className="flex justify-end gap-2">
+                {isEditingFile ? (
+                  <>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      disabled={isSavingFile}
+                      onClick={handleCancelFileEdit}
+                      className="h-8 border-white/10 bg-transparent text-[10px] uppercase hover:bg-white/5"
+                    >
+                      <Undo2 className="mr-2 h-3.5 w-3.5" />
+                      Revert
+                    </Button>
+                    <Button
+                      type="button"
+                      disabled={!fileHasUnsavedChanges || isSavingFile}
+                      onClick={handleSaveFileEdit}
+                      className="h-8 bg-primary text-primary-foreground text-[10px] font-bold uppercase hover:bg-primary/90"
+                    >
+                      {isSavingFile ? <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" /> : <Save className="mr-2 h-3.5 w-3.5" />}
+                      Save File
+                    </Button>
+                  </>
+                ) : (
+                  <Button
+                    type="button"
+                    onClick={handleStartFileEdit}
+                    className="h-8 bg-primary/90 text-primary-foreground text-[10px] font-bold uppercase hover:bg-primary"
+                  >
+                    <Edit3 className="mr-2 h-3.5 w-3.5" />
+                    Edit File
+                  </Button>
+                )}
+              </div>
             </div>
           </div>
         </div>

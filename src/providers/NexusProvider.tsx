@@ -272,9 +272,11 @@ export function NexusProvider({ children }: { children: React.ReactNode }) {
     if (!clientRef.current || !path) return;
     try {
       await sendCommand("WRITE_FILE", { path, content });
+      setFileContent(prev => prev?.path === path ? { path: prev.path, content } : prev);
       addManualLog("FILESYSTEM", `Scribe Protocol: Written to ${path}`);
     } catch (e: any) {
       addManualLog("ERROR", `Scribe Failure: ${e.message}`);
+      throw e;
     }
   }, [sendCommand, addManualLog]);
 
