@@ -9,7 +9,6 @@ import { NexusLogs } from "@/components/dashboard/NexusLogs";
 import { NeuralCommand } from "@/components/dashboard/NeuralCommand";
 import { DashboardCard } from "@/components/dashboard/DashboardCard";
 import { Shield, Zap, Bell, Link2, Loader2, Cpu, Lock, Unlock, Radio, X, FileCode, RefreshCcw, Signal, SignalHigh, SignalLow, Sparkles, Key } from "lucide-react";
-import { useUplink } from "@/hooks/use-uplink";
 import { useNexus } from "@/providers/NexusProvider";
 import { useState, useEffect } from "react";
 import { cn } from "@/lib/utils";
@@ -27,16 +26,35 @@ import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 
 export default function Home() {
-  const { url, updateUrl } = useUplink();
-  const { state, authorize, fileContent, setFileContent, consecutiveFailures, nexusKey, updateKey } = useNexus();
+  const {
+    state,
+    fileContent,
+    setFileContent,
+    consecutiveFailures,
+    nexusKey,
+    updateKey,
+    url,
+    updateUrl,
+    systemHealth,
+    knowledgeGraph,
+    lastUpdate,
+    refreshTelemetry,
+  } = useNexus();
   const [tempUrl, setTempUrl] = useState(url);
   const [tempKey, setTempKey] = useState(nexusKey);
   const [isOpen, setIsOpen] = useState(false);
+  const [isTurboSyncing, setIsTurboSyncing] = useState(false);
+  const [now, setNow] = useState(Date.now());
 
   useEffect(() => {
     setTempUrl(url);
     setTempKey(nexusKey);
   }, [url, nexusKey]);
+
+  useEffect(() => {
+    const interval = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(interval);
+  }, []);
 
   const handleSave = () => {
     updateUrl(tempUrl);
@@ -44,7 +62,21 @@ export default function Home() {
     setIsOpen(false);
   };
 
+  const handleTurboSync = async () => {
+    if (isTurboSyncing) return;
+    setIsTurboSyncing(true);
+    try {
+      await refreshTelemetry();
+    } finally {
+      setIsTurboSyncing(false);
+    }
+  };
+
   const showOverlay = state === "HANDSHAKE" || (state === "SYNCING" && consecutiveFailures > 0);
+  const lastPacketAge = lastUpdate ? Math.max(0, Math.floor((now - lastUpdate) / 1000)) : null;
+  const cpuLoad = systemHealth?.cpu_load ?? "--";
+  const ramUsed = systemHealth?.ram_used ?? "--";
+  const totalThreads = knowledgeGraph?.total_threads ?? "--";
 
   return (
     <main className="min-h-screen bg-[#020617] text-slate-100 selection:bg-cyan-500/30 overflow-x-hidden">
@@ -153,16 +185,16 @@ export default function Home() {
               <DialogHeader>
                 <DialogTitle className="font-headline uppercase tracking-widest text-primary">Nexus Configuration</DialogTitle>
                 <DialogDescription className="text-slate-400 font-mono text-xs">
-                  Enter the Cloudflare Tunnel URL and your unique Nexus Security Key to bridge the HUD.
+                  Use the local Nexus proxy or enter a tunnel URL and Security Key to bridge the HUD.
                 </DialogDescription>
               </DialogHeader>
               <div className="space-y-4 py-4">
                 <div className="space-y-2">
-                  <label className="text-[10px] font-mono-readout text-muted-foreground uppercase">Primary Tunnel URL</label>
+                  <label className="text-[10px] font-mono-readout text-muted-foreground uppercase">Nexus Route or Tunnel URL</label>
                   <Input 
                     value={tempUrl} 
                     onChange={(e) => setTempUrl(e.target.value)}
-                    placeholder="https://your-tunnel.trycloudflare.com"
+                    placeholder="/api/nexus or https://your-tunnel.trycloudflare.com"
                     className="bg-black/40 border-white/10 text-primary font-mono h-10"
                   />
                 </div>
@@ -174,7 +206,7 @@ export default function Home() {
                     type="password"
                     value={tempKey} 
                     onChange={(e) => setTempKey(e.target.value)}
-                    placeholder="Enter Omega Key from local terminal"
+                    placeholder="Optional for local proxy; required for direct tunnels"
                     className="bg-black/40 border-white/10 text-secondary font-mono h-10"
                   />
                 </div>
@@ -200,11 +232,27 @@ export default function Home() {
           <div className="lg:col-span-3 space-y-6">
             <SystemHealth />
             <NeuralCommand />
-            <div className="p-6 rounded-xl bg-gradient-to-br from-primary/20 to-transparent border border-primary/10 group cursor-pointer hover:border-primary/40 transition-all">
-                <Zap className="w-8 h-8 text-primary mb-2 group-hover:scale-110 transition-transform" />
+            <button
+              type="button"
+              onClick={handleTurboSync}
+              disabled={isTurboSyncing || state === "OFFLINE"}
+              className="w-full p-6 rounded-xl bg-gradient-to-br from-primary/20 to-transparent border border-primary/10 group cursor-pointer hover:border-primary/40 transition-all text-left disabled:cursor-not-allowed disabled:opacity-50"
+            >
+                {isTurboSyncing ? (
+                  <RefreshCcw className="w-8 h-8 text-primary mb-2 animate-spin" />
+                ) : (
+                  <Zap className="w-8 h-8 text-primary mb-2 group-hover:scale-110 transition-transform" />
+                )}
                 <h3 className="font-headline font-bold text-sm">Turbo Sync</h3>
-                <p className="text-xs text-muted-foreground mt-1">Force immediate agent state updates across all clusters.</p>
-            </div>
+                <p className="text-xs text-muted-foreground mt-1">
+                  {isTurboSyncing ? "Pulling live Nexus packets..." : "Force immediate Nexus sensor refresh."}
+                </p>
+                <div className="mt-4 grid grid-cols-3 gap-2 font-mono text-[9px] uppercase">
+                  <span className="rounded border border-white/10 bg-black/20 px-2 py-1 text-primary">CPU {cpuLoad}%</span>
+                  <span className="rounded border border-white/10 bg-black/20 px-2 py-1 text-secondary">RAM {ramUsed}%</span>
+                  <span className="rounded border border-white/10 bg-black/20 px-2 py-1 text-muted-foreground">PID {totalThreads}</span>
+                </div>
+            </button>
           </div>
 
           <div className="lg:col-span-6 space-y-6">
@@ -239,6 +287,14 @@ export default function Home() {
                             )}>
                               {state}
                             </span>
+                        </div>
+                        <div className="flex items-center justify-between text-[10px] font-mono">
+                            <span className="text-muted-foreground">Last Packet</span>
+                            <span className="text-primary">{lastPacketAge === null ? "--" : `${lastPacketAge}s ago`}</span>
+                        </div>
+                        <div className="flex items-center justify-between text-[10px] font-mono">
+                            <span className="text-muted-foreground">Thread Map</span>
+                            <span className="text-secondary">{totalThreads}</span>
                         </div>
                         <div className="w-full bg-white/5 h-1 rounded-full overflow-hidden">
                           <div 

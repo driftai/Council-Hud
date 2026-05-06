@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { DashboardCard } from "./DashboardCard";
-import { FolderSync, FileJson, Folder, ChevronRight, ChevronDown, HardDrive, Settings2, RefreshCw, Eye } from "lucide-react";
+import { ArrowUp, FileJson, Folder, FolderOpen, FolderSync, ChevronRight, ChevronDown, HardDrive, Home, Settings2, RefreshCw, Eye } from "lucide-react";
 import { useNexus } from "@/providers/NexusProvider";
 import { cn } from "@/lib/utils";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -18,14 +18,52 @@ interface FileNode {
   children?: FileNode[];
 }
 
-function FileTreeItem({ node, depth = 0 }: { node: FileNode; depth?: number }) {
+function normalizePath(value: string) {
+  return value.replace(/\\/g, "/").replace(/\/+$/, "");
+}
+
+function getParentPath(value: string) {
+  const normalized = normalizePath(value);
+  if (!normalized || /^[a-zA-Z]:\/?$/.test(normalized)) return "";
+
+  const parts = normalized.split("/");
+  parts.pop();
+
+  const parent = parts.join("/");
+  if (/^[a-zA-Z]:$/.test(parent)) return `${parent}/`;
+  return parent || "/";
+}
+
+function formatPathLabel(value: string) {
+  if (!value) return "Nexus Root";
+  const normalized = normalizePath(value);
+  return normalized.split("/").filter(Boolean).slice(-3).join(" / ") || normalized;
+}
+
+function getVisibleRootPath(fileTree: unknown) {
+  if (!Array.isArray(fileTree) || fileTree.length !== 1) return "";
+  const rootNode = fileTree[0] as Partial<FileNode>;
+  const isFolder = rootNode.type === "folder" || rootNode.type === "directory";
+  return isFolder && typeof rootNode.path === "string" ? rootNode.path : "";
+}
+
+function FileTreeItem({
+  node,
+  depth = 0,
+  onNavigate,
+}: {
+  node: FileNode;
+  depth?: number;
+  onNavigate: (path: string) => void;
+}) {
   const [isOpen, setIsOpen] = useState(false);
   const { readFile } = useNexus();
   const isFolder = node.type === 'folder' || node.type === 'directory';
+  const hasChildren = isFolder && Array.isArray(node.children) && node.children.length > 0;
 
   const handleClick = () => {
     if (isFolder) {
-      setIsOpen(!isOpen);
+      if (hasChildren) setIsOpen(!isOpen);
     } else {
       readFile(node.path);
     }
@@ -40,10 +78,17 @@ function FileTreeItem({ node, depth = 0 }: { node: FileNode; depth?: number }) {
         )}
         style={{ paddingLeft: `${depth * 12 + 8}px` }}
         onClick={handleClick}
+        onDoubleClick={() => {
+          if (isFolder) onNavigate(node.path);
+        }}
       >
         {isFolder ? (
           <>
-            {isOpen ? <ChevronDown className="w-3 h-3 text-muted-foreground" /> : <ChevronRight className="w-3 h-3 text-muted-foreground" />}
+            {hasChildren ? (
+              isOpen ? <ChevronDown className="w-3 h-3 text-muted-foreground" /> : <ChevronRight className="w-3 h-3 text-muted-foreground" />
+            ) : (
+              <div className="w-3" />
+            )}
             <Folder className={cn("w-3.5 h-3.5", isOpen ? "text-primary" : "text-primary/60")} />
           </>
         ) : (
@@ -61,12 +106,26 @@ function FileTreeItem({ node, depth = 0 }: { node: FileNode; depth?: number }) {
         {!isFolder && (
           <Eye className="w-2.5 h-2.5 opacity-0 group-hover:opacity-100 text-primary transition-opacity" />
         )}
+        {isFolder && (
+          <button
+            type="button"
+            title="Open folder as root"
+            aria-label={`Open ${node.name} as root`}
+            className="h-6 w-6 shrink-0 rounded border border-white/10 bg-black/30 text-primary opacity-0 transition-all hover:bg-primary/10 hover:border-primary/30 focus:opacity-100 focus:outline-none focus:ring-1 focus:ring-primary group-hover:opacity-100"
+            onClick={(event) => {
+              event.stopPropagation();
+              onNavigate(node.path);
+            }}
+          >
+            <FolderOpen className="mx-auto h-3.5 w-3.5" />
+          </button>
+        )}
       </div>
       
-      {isFolder && isOpen && node.children && (
+      {isFolder && isOpen && hasChildren && (
         <div className="border-l border-white/5 ml-[18px]">
-          {node.children.map((child: any) => (
-            <FileTreeItem key={child.path || child.name} node={child} depth={depth + 1} />
+          {node.children!.map((child: any) => (
+            <FileTreeItem key={child.path || child.name} node={child} depth={depth + 1} onNavigate={onNavigate} />
           ))}
         </div>
       )}
@@ -75,12 +134,33 @@ function FileTreeItem({ node, depth = 0 }: { node: FileNode; depth?: number }) {
 }
 
 export function FileWatcher() {
-  const { state, fileTree, sendCommand } = useNexus();
+  const { state, fileTree, sendCommand, workingDirectory } = useNexus();
   const [isConfiguring, setIsConfiguring] = useState(false);
   const [newPath, setNewPath] = useState("");
   const [isSyncing, setIsSyncing] = useState(false);
+  const [isNavigating, setIsNavigating] = useState(false);
 
   const connected = state === "LINKED";
+  const visibleRootPath = getVisibleRootPath(fileTree);
+  const activeDirectory = workingDirectory || visibleRootPath;
+  const parentPath = getParentPath(activeDirectory);
+  const pathLabel = workingDirectory
+    ? formatPathLabel(workingDirectory)
+    : visibleRootPath
+      ? `Nexus Root / ${formatPathLabel(visibleRootPath)}`
+      : "Nexus Root";
+
+  const navigateToPath = async (path: string, reset = false) => {
+    if (!connected || isNavigating) return;
+    setIsNavigating(true);
+    try {
+      await sendCommand("SET_PATH", { path, reset });
+    } catch (e) {
+      console.error("Navigation Failed:", e);
+    } finally {
+      setIsNavigating(false);
+    }
+  };
 
   const handleSyncPath = async () => {
     if (!newPath) return;
@@ -112,6 +192,39 @@ export function FileWatcher() {
       }
     >
       <div className="h-[300px] flex flex-col">
+        <div className="mb-3 flex items-center gap-2 rounded-lg border border-white/5 bg-black/20 p-2">
+          <Button
+            type="button"
+            size="icon"
+            variant="ghost"
+            title="Go to parent folder"
+            aria-label="Go to parent folder"
+            disabled={!connected || !parentPath || isNavigating}
+            className="h-7 w-7 shrink-0 text-muted-foreground hover:text-primary"
+            onClick={() => navigateToPath(parentPath)}
+          >
+            <ArrowUp className="h-3.5 w-3.5" />
+          </Button>
+          <Button
+            type="button"
+            size="icon"
+            variant="ghost"
+            title="Go to mirror root"
+            aria-label="Go to mirror root"
+            disabled={!connected || isNavigating}
+            className="h-7 w-7 shrink-0 text-muted-foreground hover:text-primary"
+            onClick={() => navigateToPath("", true)}
+          >
+            <Home className="h-3.5 w-3.5" />
+          </Button>
+          <div className="min-w-0 flex-1">
+            <p className="truncate font-mono text-[9px] uppercase tracking-widest text-muted-foreground">
+              {pathLabel}
+            </p>
+          </div>
+          {isNavigating && <RefreshCw className="h-3.5 w-3.5 animate-spin text-primary" />}
+        </div>
+
         {isConfiguring && (
           <div className="mb-4 p-3 rounded-lg bg-black/40 border border-primary/20 space-y-3 animate-in slide-in-from-top-2">
             <div className="space-y-1">
@@ -119,7 +232,7 @@ export function FileWatcher() {
               <Input 
                 value={newPath}
                 onChange={(e) => setNewPath(e.target.value)}
-                placeholder="C:\Users\user\..."
+                placeholder="C:/Path/To/Workspace"
                 className="h-8 bg-black/60 border-white/10 text-[10px] font-mono text-primary"
               />
             </div>
@@ -147,7 +260,7 @@ export function FileWatcher() {
           <ScrollArea className="flex-1 -mx-4">
             <div className="py-2">
               {Array.isArray(fileTree) ? fileTree.map((rootNode: FileNode) => (
-                <FileTreeItem key={rootNode.path || rootNode.name} node={rootNode} />
+                <FileTreeItem key={rootNode.path || rootNode.name} node={rootNode} onNavigate={navigateToPath} />
               )) : null}
             </div>
           </ScrollArea>

@@ -17,18 +17,19 @@ The project is structured as a **Platinum Monorepo**, ensuring total synchroniza
 
 ## 🚀 Deployment Sequence
 
-### 1. The Hands (Local WSL Node)
-1.  Navigate to `/Council-Data-Router` in your WSL (Ubuntu) terminal.
-2.  Install dependencies: `npm install`.
-3.  Execute the Master Switch: Run `toggle-router.bat` on Windows.
-4.  Select Protocol **[1]** to ignite the Uplink and Cloudflare Tunnel.
-5.  **Copy the 🛡️ SECURITY KEY** and the **Tunnel URL** from the terminal.
+### Local Windows Quick Start
+1.  Install Node.js LTS.
+2.  Run `Council-Data-Router/toggle-router.bat`.
+3.  Select **[1] START HUD + ROUTER**.
+4.  Open `http://localhost:9002`.
 
-### 2. The Brain (Cloud HUD)
-1.  Open your HUD in Firebase Studio / Project IDX.
-2.  Open the **"Configure Uplink"** dialog.
-3.  Paste the **Tunnel URL** and **Security Key**.
-4.  Hit **Connect** to establish the Neural Handshake.
+The launcher installs missing npm dependencies, starts the local router at `http://127.0.0.1:3001`, and starts the HUD at `http://localhost:9002`. The HUD defaults to `/api/nexus`, so local telemetry works without copying a tunnel URL or security key.
+
+### Optional Remote Tunnel
+1.  Install `cloudflared`.
+2.  Run `Council-Data-Router/toggle-router.bat`.
+3.  Select **[3] START CLOUDFLARE TUNNEL**.
+4.  Use the printed tunnel URL only when you need a remote browser to reach the local router.
 
 ---
 
@@ -64,6 +65,10 @@ This project is optimized for **Project IDX** environments. To synchronize the g
 -   **Telemetry**: `GET /graph` (Auth Protected)
 -   **Filesystem**: `POST /filesystem/tree` (Auth Protected)
 -   **Executive**: `/exec`, `/read-file`, `/write-file` (Auth Protected)
+
+### CORE_TEMP Telemetry
+
+`CORE_TEMP` uses real sensor data only. On Windows systems that do not expose CPU temperature natively, run `Council-Data-Router/setup-core-temp-autostart.bat` once and approve the administrator prompt. This installs/starts LibreHardwareMonitor as a highest-privilege logon task and enables its local sensor feed at `http://127.0.0.1:8085/data.json`, so later HUD sessions can read CPU temperature without repeated UAC prompts.
 
 ---
 

@@ -1,9 +1,14 @@
 
+import fs from 'node:fs';
+import pathModule from 'node:path';
 import { NextRequest, NextResponse } from 'next/server';
 
-const DEFAULT_NEXUS_TARGET = 'https://great-suits-battle.loca.lt';
+export const runtime = 'nodejs';
+
+const DEFAULT_NEXUS_TARGET = 'http://127.0.0.1:3001';
 const PROXY_TIMEOUT_MS = Number(process.env.NEXUS_PROXY_TIMEOUT_MS || 10000);
 const PROXY_BODY_LIMIT = Number(process.env.NEXUS_PROXY_BODY_LIMIT_BYTES || 10 * 1024 * 1024);
+const LOCAL_KEY_PATH = pathModule.join(process.cwd(), 'Council-Data-Router', 'nexus.key');
 
 /**
  * Nexus Proxy Fortress V110
@@ -20,7 +25,7 @@ export async function POST(request: NextRequest, props: { params: Promise<{ path
   return handleRequest(request, params.path);
 }
 
-async function handleRequest(request: NextRequest, path: string[]) {
+async function handleRequest(request: NextRequest, pathParts: string[]) {
   let tunnelBase: string;
   try {
     tunnelBase = resolveTargetBase(request);
@@ -28,7 +33,7 @@ async function handleRequest(request: NextRequest, path: string[]) {
     return NextResponse.json({ error: 'Invalid Nexus target', message: error.message }, { status: 400 });
   }
 
-  const endpoint = path.join('/');
+  const endpoint = pathParts.join('/');
   const url = `${tunnelBase}/${endpoint.replace(/^\/+/, '')}`;
 
   const headers = new Headers();
@@ -36,7 +41,7 @@ async function handleRequest(request: NextRequest, path: string[]) {
   headers.set('Accept', 'application/json');
   headers.set('bypass-tunnel-reminder', 'true');
 
-  const nexusKey = request.headers.get('x-nexus-key');
+  const nexusKey = request.headers.get('x-nexus-key') || getServerNexusKey();
   if (nexusKey) {
     headers.set('x-nexus-key', nexusKey);
   }
@@ -87,6 +92,21 @@ async function handleRequest(request: NextRequest, path: string[]) {
       target: url 
     }, { status: 502 });
   }
+}
+
+function getServerNexusKey(): string {
+  const envKey = process.env.NEXUS_KEY || process.env.NEXUS_SECURITY_KEY;
+  if (envKey) return envKey.trim();
+
+  try {
+    if (fs.existsSync(LOCAL_KEY_PATH)) {
+      return fs.readFileSync(LOCAL_KEY_PATH, 'utf8').trim();
+    }
+  } catch (error: any) {
+    console.warn('Proxy: Failed to read local Nexus key:', error.message);
+  }
+
+  return '';
 }
 
 function resolveTargetBase(request: NextRequest): string {

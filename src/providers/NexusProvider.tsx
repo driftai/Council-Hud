@@ -28,6 +28,7 @@ interface NexusContextType {
   consecutiveFailures: number;
   workingDirectory: string;
   setFileContent: (val: { path: string; content: string } | null) => void;
+  refreshTelemetry: () => Promise<void>;
   authorize: () => void;
   sendCommand: (cmd: string, payload: any) => Promise<any>;
   readFile: (path: string) => Promise<string | null>;
@@ -226,18 +227,14 @@ export function NexusProvider({ children }: { children: React.ReactNode }) {
       endpoint = '/write-file';
     } else if (cmd === 'SET_PATH') {
       endpoint = '/filesystem/tree';
-      bodyPayload = { path: payload.path };
+      bodyPayload = { path: payload.path, reset: payload.reset, depth: payload.depth };
     }
 
     try {
       const result = await clientRef.current.sendCommand(endpoint, bodyPayload);
       if (cmd === 'SET_PATH') {
-        // Immediate State Sync to prevent race conditions
-        setWorkingDirectory(payload.path);
-        const treeResult = await clientRef.current.fetchEnvelope<any>("/filesystem/tree", {
-          method: 'POST',
-          body: { path: payload.path }
-        }) as any;
+        setWorkingDirectory(payload.reset ? "" : (payload.path || ""));
+        const treeResult = result as any;
         const cleanTree = Array.isArray(treeResult)
           ? treeResult
           : (treeResult.payload?.tree || treeResult.payload || treeResult.tree || []);
@@ -294,7 +291,7 @@ export function NexusProvider({ children }: { children: React.ReactNode }) {
     <NexusContext.Provider value={{ 
       state, systemHealth, knowledgeGraph, fileChanges, fileTree, nexusLogs,
       lastUpdate, url, nexusKey, status, fileContent, consecutiveFailures, workingDirectory,
-      setFileContent, authorize, sendCommand, readFile, writeFile, killProcess, addManualLog, clearLogs, updateUrl, updateKey
+      setFileContent, refreshTelemetry: fetchData, authorize, sendCommand, readFile, writeFile, killProcess, addManualLog, clearLogs, updateUrl, updateKey
     }}>
       {children}
     </NexusContext.Provider>

@@ -49,7 +49,7 @@ const requireAuth = (req, res, next) => {
 // ==========================================
 const CONFIG_DIR = path.join(__dirname, 'config');
 const PATH_CONFIG_FILE = path.join(CONFIG_DIR, 'paths.json');
-let currentTargetPath = '/home/linux-user/OpenClawStuff'; // Memory fallback
+let currentTargetPath = process.env.NEXUS_DEFAULT_PATH || path.resolve(__dirname, '..'); // Memory fallback
 
 if (!fs.existsSync(CONFIG_DIR)) fs.mkdirSync(CONFIG_DIR);
 

@@ -6,15 +6,25 @@ import { Progress } from "@/components/ui/progress";
 import { cn } from "@/lib/utils";
 import { useNexus } from "@/providers/NexusProvider";
 
+function toNumber(value: unknown) {
+  if (value === null || value === undefined || value === "") return null;
+  const reading = Number(value);
+  return Number.isFinite(reading) ? reading : null;
+}
+
 export function SystemHealth() {
   const { state, systemHealth, url, status } = useNexus();
   
   const connected = state === "LINKED" || state === "SYNCING" || state === "RE-SYNCING";
-  const stats = systemHealth || { cpu_load: 0, ram_used: 0, cpu_temp: 0, uptime: 0 };
+  const stats = systemHealth || {};
+  const cpuLoad = toNumber(stats.cpu_load);
+  const ramUsed = toNumber(stats.ram_used);
+  const cpuTemp = toNumber(stats.cpu_temp);
+  const uptime = toNumber(stats.uptime);
   const isDegraded = status === "DEGRADED" || state === "RE-SYNCING";
 
-  const isHighLoad = stats.cpu_load > 50;
-  const isCriticalLoad = stats.cpu_load > 80;
+  const isHighLoad = (cpuLoad ?? 0) > 50;
+  const isCriticalLoad = (cpuLoad ?? 0) > 80;
   
   // Reactive Pulse: Speeds up and intensifies based on CPU load
   const pulseSpeed = isCriticalLoad ? "0.5s" : isHighLoad ? "1.2s" : "3.5s";
@@ -75,10 +85,10 @@ export function SystemHealth() {
               <Cpu className={cn("w-3 h-3", connected ? "text-primary animate-pulse" : "text-muted-foreground")} /> CPU_CORE_LOAD
             </span>
             <span className={cn("font-bold", isHighLoad ? "text-primary" : "text-foreground")}>
-              {connected ? `${stats.cpu_load}%` : "---"}
+              {connected && cpuLoad !== null ? `${cpuLoad}%` : "---"}
             </span>
           </div>
-          <Progress value={stats.cpu_load} className={cn("h-1.5 bg-white/5", isCriticalLoad && "bg-destructive/20")} />
+          <Progress value={cpuLoad ?? 0} className={cn("h-1.5 bg-white/5", isCriticalLoad && "bg-destructive/20")} />
         </div>
 
         <div className="space-y-2">
@@ -87,26 +97,32 @@ export function SystemHealth() {
               <Database className={cn("w-3 h-3", connected ? "text-secondary" : "text-muted-foreground")} /> MEMORY_ALLOCATION
             </span>
             <span className={cn("font-bold", connected ? "text-secondary" : "text-muted-foreground")}>
-              {connected ? `${stats.ram_used}%` : "---"}
+              {connected && ramUsed !== null ? `${ramUsed}%` : "---"}
             </span>
           </div>
-          <Progress value={stats.ram_used} className="h-1.5 bg-white/5" />
+          <Progress value={ramUsed ?? 0} className="h-1.5 bg-white/5" />
         </div>
 
         <div className="grid grid-cols-2 gap-4 mt-4 pt-4 border-t border-white/5">
           <div className="text-center">
             <p className="font-mono-readout text-[9px] text-muted-foreground mb-1">CORE_TEMP</p>
             <div className="flex items-center justify-center gap-1">
-               <Thermometer className={cn("w-3 h-3", stats.cpu_temp > 70 ? "text-destructive animate-bounce" : "text-destructive/80")} />
+               <Thermometer className={cn("w-3 h-3", (cpuTemp ?? 0) > 70 ? "text-destructive animate-bounce" : "text-destructive/80")} />
                <p className="text-lg font-bold font-mono text-foreground">
-                {connected ? stats.cpu_temp : "--"}<span className="text-[10px] ml-0.5">°C</span>
+                {connected && cpuTemp !== null ? (
+                  <>
+                    {cpuTemp}<span className="text-[10px] ml-0.5">°C</span>
+                  </>
+                ) : (
+                  <span className="text-[12px] text-muted-foreground">N/A</span>
+                )}
                </p>
             </div>
           </div>
           <div className="text-center">
             <p className="font-mono-readout text-[9px] text-muted-foreground mb-1">SYSTEM_UPTIME</p>
             <p className="text-lg font-bold font-mono text-foreground">
-              {connected ? Math.floor(stats.uptime / 3600) : "--"}<span className="text-[10px] ml-0.5">HR</span>
+              {connected && uptime !== null ? Math.floor(uptime / 3600) : "--"}<span className="text-[10px] ml-0.5">HR</span>
             </p>
           </div>
         </div>

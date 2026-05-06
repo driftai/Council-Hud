@@ -3,7 +3,7 @@
 
 ## 1. The UNC Pathing Secret
 When running a Node.js process on Windows that needs to index or watch files inside a Linux WSL distribution, standard Linux paths (`/home/user/...`) are invisible.
-- **The Fix**: Use Windows UNC paths: `\\wsl.localhost\Ubuntu\home\linux-user\OpenClawStuff`.
+- **The Fix**: Use Windows UNC paths: `\\wsl.localhost\Ubuntu\home\<linux-user>\<workspace>`.
 - **Note**: In JSON or Batch strings, remember to quadruple-escape backslashes: `\\\\wsl.localhost\\...`.
 
 ## 2. EISDIR & Shortcut Stability
