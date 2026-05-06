@@ -10,6 +10,7 @@
 
 import { ai } from '@/ai/genkit';
 import { z } from 'genkit';
+import { getRuntimeEnvValue } from '@/lib/runtime-env';
 
 const MessageSchema = z.object({
   role: z.enum(['user', 'model']),
@@ -43,7 +44,7 @@ export type NexusCommandOutput = z.infer<typeof NexusCommandOutputSchema>;
 
 export async function nexusCommand(input: NexusCommandInput): Promise<NexusCommandOutput> {
   const NVIDIA_URL = "https://integrate.api.nvidia.com/v1/chat/completions";
-  const apiKey = process.env.NVIDIA_API_KEY;
+  const apiKey = getRuntimeEnvValue("NVIDIA_API_KEY");
 
   if (!apiKey) {
     throw new Error("NVIDIA_API_KEY is not set.");

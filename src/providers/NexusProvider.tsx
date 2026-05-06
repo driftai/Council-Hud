@@ -14,6 +14,10 @@ export interface NexusLog {
   payload: any;
 }
 
+type ReadFileOptions = {
+  openInspector?: boolean;
+};
+
 interface NexusContextType {
   state: ConnectionState;
   systemHealth: any | null;
@@ -32,7 +36,7 @@ interface NexusContextType {
   refreshTelemetry: () => Promise<void>;
   authorize: () => void;
   sendCommand: (cmd: string, payload: any) => Promise<any>;
-  readFile: (path: string) => Promise<string | null>;
+  readFile: (path: string, options?: ReadFileOptions) => Promise<string | null>;
   writeFile: (path: string, content: string) => Promise<void>;
   killProcess: (pid: number) => Promise<void>;
   addManualLog: (type: string, payload: any) => void;
@@ -243,7 +247,7 @@ export function NexusProvider({ children }: { children: React.ReactNode }) {
     }
   }, [fetchData, addManualLog]);
 
-  const readFile = useCallback(async (path: string): Promise<string | null> => {
+  const readFile = useCallback(async (path: string, options: ReadFileOptions = {}): Promise<string | null> => {
     if (!clientRef.current || !path) return null;
     try {
       const response = await sendCommand("READ_FILE", { path });
@@ -251,8 +255,14 @@ export function NexusProvider({ children }: { children: React.ReactNode }) {
       const filepath = response?.payload?.filepath ?? response?.path ?? path;
 
       if (content !== undefined) {
-        setFileContent({ path: filepath, content: content });
-        addManualLog("FILE_READ", { path: filepath, bytes: String(content).length });
+        if (options.openInspector !== false) {
+          setFileContent({ path: filepath, content: content });
+        }
+        addManualLog("FILE_READ", {
+          path: filepath,
+          bytes: String(content).length,
+          viewer: options.openInspector === false ? "agent_context" : "remote_inspector",
+        });
         return content;
       }
       throw new Error(response?.error || "Empty response from node.");

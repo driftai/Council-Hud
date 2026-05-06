@@ -51,6 +51,10 @@ export default function Home() {
   const [draftFileContent, setDraftFileContent] = useState("");
   const [isSavingFile, setIsSavingFile] = useState(false);
   const [fileEditorError, setFileEditorError] = useState<string | null>(null);
+  const [tempNvidiaKey, setTempNvidiaKey] = useState("");
+  const [nvidiaKeyConfigured, setNvidiaKeyConfigured] = useState(false);
+  const [isSavingNvidiaKey, setIsSavingNvidiaKey] = useState(false);
+  const [nvidiaKeyMessage, setNvidiaKeyMessage] = useState<string | null>(null);
 
   useEffect(() => {
     setTempUrl(url);
@@ -61,6 +65,24 @@ export default function Home() {
     const interval = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(interval);
   }, []);
+
+  useEffect(() => {
+    if (!isOpen) return;
+
+    let isMounted = true;
+    fetch("/api/runtime/nvidia-key", { cache: "no-store" })
+      .then((response) => response.ok ? response.json() : null)
+      .then((data) => {
+        if (isMounted && data) setNvidiaKeyConfigured(Boolean(data.configured));
+      })
+      .catch(() => {
+        if (isMounted) setNvidiaKeyConfigured(false);
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, [isOpen]);
 
   useEffect(() => {
     if (!fileContent) {
@@ -79,6 +101,33 @@ export default function Home() {
     updateUrl(tempUrl);
     updateKey(tempKey);
     setIsOpen(false);
+  };
+
+  const handleSaveNvidiaKey = async () => {
+    const trimmedKey = tempNvidiaKey.trim();
+    if (!trimmedKey || isSavingNvidiaKey) return;
+
+    setIsSavingNvidiaKey(true);
+    setNvidiaKeyMessage(null);
+    try {
+      const response = await fetch("/api/runtime/nvidia-key", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ key: trimmedKey }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(data?.error || "Failed to save NVIDIA API key.");
+      }
+
+      setTempNvidiaKey("");
+      setNvidiaKeyConfigured(true);
+      setNvidiaKeyMessage("NVIDIA key stored in .env.local");
+    } catch (error: any) {
+      setNvidiaKeyMessage(error?.message || "Failed to save NVIDIA API key.");
+    } finally {
+      setIsSavingNvidiaKey(false);
+    }
   };
 
   const handleTurboSync = async () => {
@@ -327,6 +376,44 @@ export default function Home() {
                     className="bg-black/40 border-white/10 text-secondary font-mono h-10"
                   />
                 </div>
+                <div className="space-y-2 rounded border border-white/10 bg-black/20 p-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <label className="text-[10px] font-mono-readout text-muted-foreground uppercase flex items-center gap-2">
+                      <Sparkles className="w-3 h-3 text-primary" /> NVIDIA API Key
+                    </label>
+                    <span className={cn("font-mono text-[8px] uppercase", nvidiaKeyConfigured ? "text-secondary" : "text-yellow-500")}>
+                      {nvidiaKeyConfigured ? "Configured" : "Missing"}
+                    </span>
+                  </div>
+                  <div className="flex gap-2">
+                    <Input
+                      type="password"
+                      value={tempNvidiaKey}
+                      onChange={(e) => {
+                        setTempNvidiaKey(e.target.value);
+                        setNvidiaKeyMessage(null);
+                      }}
+                      placeholder="nvapi-..."
+                      className="h-9 bg-black/40 border-white/10 text-primary font-mono text-xs"
+                    />
+                    <Button
+                      type="button"
+                      onClick={handleSaveNvidiaKey}
+                      disabled={!tempNvidiaKey.trim() || isSavingNvidiaKey}
+                      className="h-9 shrink-0 bg-primary text-primary-foreground hover:bg-primary/90"
+                    >
+                      {isSavingNvidiaKey ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : "Save"}
+                    </Button>
+                  </div>
+                  <p className={cn(
+                    "font-mono text-[8px]",
+                    nvidiaKeyMessage?.includes("Failed") || nvidiaKeyMessage?.includes("only enabled") || nvidiaKeyMessage?.includes("should start")
+                      ? "text-destructive"
+                      : "text-muted-foreground"
+                  )}>
+                    {nvidiaKeyMessage || "Stored locally in .env.local for Neural Command."}
+                  </p>
+                </div>
               </div>
               <DialogFooter>
                 <Button variant="outline" onClick={() => setIsOpen(false)} className="border-white/10 hover:bg-white/5">Cancel</Button>
@@ -348,7 +435,6 @@ export default function Home() {
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-12 gap-6">
           <div className="lg:col-span-3 space-y-6">
             <SystemHealth />
-            <NeuralCommand />
             <button
               type="button"
               onClick={handleTurboSync}
@@ -373,6 +459,7 @@ export default function Home() {
           </div>
 
           <div className="lg:col-span-6 space-y-6">
+            <NeuralCommand />
             <NeuralVisualizer />
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                 <KnowledgeGraph />

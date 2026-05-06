@@ -15,13 +15,14 @@ echo  [2] START ROUTER ONLY
 echo  [3] START CLOUDFLARE TUNNEL
 echo  [4] SETUP CORE TEMP AUTOSTART
 echo  [5] TERMINATE LOCAL STACK
-echo  [6] EXIT
+echo  [6] SET NVIDIA API KEY
+echo  [7] EXIT
 echo ==========================================
 if defined AUTO_CHOICE (
     set "choice=%AUTO_CHOICE%"
     set "AUTO_CHOICE="
 ) else (
-    set /p choice="Select Protocol [1-6]: "
+    set /p choice="Select Protocol [1-7]: "
 )
 
 if "%choice%"=="1" (
@@ -85,6 +86,12 @@ if "%choice%"=="5" (
 )
 
 if "%choice%"=="6" (
+    powershell -NoProfile -ExecutionPolicy Bypass -File "%ROUTER_DIR%utils\set-nvidia-env-key.ps1" -ProjectRoot "%ROOT_DIR%"
+    pause
+    goto menu
+)
+
+if "%choice%"=="7" (
     exit /b 0
 )
 

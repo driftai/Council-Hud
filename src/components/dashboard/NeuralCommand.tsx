@@ -38,7 +38,12 @@ export function NeuralCommand() {
    * Uses a local 'history' variable to ensure the AI receives 
    * retrieved results in the SAME operational flow.
    */
-  const processAiTurn = async (input: string, historySeed: ChatMessage[], isSilent: boolean = false) => {
+  const processAiTurn = async (
+    input: string,
+    historySeed: ChatMessage[],
+    isSilent: boolean = false,
+    rootDirective: string = input
+  ) => {
     let localHistory = [...historySeed];
     
     if (!isSilent) {
@@ -87,20 +92,41 @@ export function NeuralCommand() {
 
       // --- SYNCHRONOUS HANDSHAKE LOOP ---
       if (result.command === "READ_FILE" && result.payload?.path) {
-        addManualLog("COMMAND", `Executing READ_FILE: ${result.payload.path}`);
+        const readPath = String(result.payload.path);
+        addManualLog("COMMAND", `Executing READ_FILE: ${readPath}`);
         try {
-          const content = await nexus.readFile(result.payload.path);
+          const content = await nexus.readFile(readPath, { openInspector: false });
           if (content !== null) {
             // RECURSIVE TURN: Content injected immediately into localHistory accumulator
             await processAiTurn(
-              `SYSTEM_FEEDBACK: File retrieved from ${result.payload.path}.\nCONTENT:\n"""\n${content}\n"""\nIdentify the codeword and provide the final answer.`,
+              `SYSTEM_FEEDBACK: File retrieved from ${readPath}.
+ORIGINAL_DIRECTIVE:
+"""
+${rootDirective}
+"""
+CONTENT:
+"""
+${content}
+"""
+Answer the original directive using this file content. Do not open the file inspector. Do not request another file read unless a different file is required.`,
               localHistory,
-              true
+              true,
+              rootDirective
             );
           }
         } catch (readError: any) {
           addManualLog("ERROR", `READ_FILE FAILED: ${readError.message}`);
-          await processAiTurn(`SYSTEM_FEEDBACK: READ_FILE_FAILED error=${readError.message}`, localHistory, true);
+          await processAiTurn(
+            `SYSTEM_FEEDBACK: READ_FILE_FAILED error=${readError.message}
+ORIGINAL_DIRECTIVE:
+"""
+${rootDirective}
+"""
+Tell the user the file could not be read and include the failure reason.`,
+            localHistory,
+            true,
+            rootDirective
+          );
         }
       } else if (result.command !== "NONE") {
         addManualLog("COMMAND", `Executing ${result.command}`);
@@ -131,7 +157,7 @@ export function NeuralCommand() {
     if (!prompt || isLoading) return;
     const currentInput = prompt;
     setPrompt("");
-    processAiTurn(currentInput, messages);
+    processAiTurn(currentInput, messages, false, currentInput);
   };
 
   return (
@@ -163,7 +189,7 @@ export function NeuralCommand() {
                     </div>
                   )}
                 </div>
-                <div className={cn("max-w-[90%] p-2 rounded-lg font-mono text-[10px] leading-relaxed", msg.role === 'user' ? "bg-secondary/10 border border-secondary/20 text-secondary-foreground" : "bg-primary/5 border border-primary/10 text-foreground/90 italic")}>
+                <div className={cn("max-w-[90%] p-2 rounded-lg font-mono text-[10px] leading-relaxed", msg.role === 'user' ? "bg-secondary/10 border border-secondary/30 text-secondary shadow-[0_0_14px_rgba(34,197,94,0.08)]" : "bg-primary/5 border border-primary/10 text-foreground/90 italic")}>
                   {msg.content.startsWith('SYSTEM_FEEDBACK') ? 'Processing neural data...' : msg.content}
                 </div>
               </div>
