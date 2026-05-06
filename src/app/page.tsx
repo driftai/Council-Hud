@@ -77,6 +77,12 @@ export default function Home() {
   const cpuLoad = systemHealth?.cpu_load ?? "--";
   const ramUsed = systemHealth?.ram_used ?? "--";
   const totalThreads = knowledgeGraph?.total_threads ?? "--";
+  const isLocalProxy = url === "/api/nexus";
+  const shieldStatus = nexusKey ? "OMEGA_ACTIVE" : isLocalProxy ? "LOCAL_PROXY" : "KEY_REQUIRED";
+  const shieldStatusClass = nexusKey || isLocalProxy ? "text-secondary" : "text-yellow-500";
+  const uplinkLabel = isLocalProxy
+    ? "LOCAL_NEXUS_PROXY"
+    : url.replace("https://", "").replace("http://", "");
 
   return (
     <main className="min-h-screen bg-[#020617] text-slate-100 selection:bg-cyan-500/30 overflow-x-hidden">
@@ -163,13 +169,13 @@ export default function Home() {
           </div>
           <div className="flex flex-col">
             <span className="text-muted-foreground uppercase">Shield Status</span>
-            <span className={cn("font-bold", nexusKey ? "text-secondary" : "text-destructive")}>
-              {nexusKey ? "OMEGA_ACTIVE" : "NO_KEY"}
+            <span className={cn("font-bold", shieldStatusClass)}>
+              {shieldStatus}
             </span>
           </div>
           <div className="flex flex-col">
             <span className="text-muted-foreground uppercase">Uplink</span>
-            <span className="text-primary truncate max-w-[150px]">{url.replace('https://', '').replace('http://', '')}</span>
+            <span className="text-primary truncate max-w-[150px]">{uplinkLabel}</span>
           </div>
         </div>
 
@@ -178,7 +184,7 @@ export default function Home() {
             <DialogTrigger asChild>
               <button className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-primary/10 border border-primary/30 hover:bg-primary/20 transition-all group">
                 <Link2 className="w-4 h-4 text-primary group-hover:rotate-12 transition-transform" />
-                <span className="font-mono-readout text-[10px] text-primary">Configure Uplink</span>
+                <span className="font-mono-readout text-[10px] text-primary">Uplink Settings</span>
               </button>
             </DialogTrigger>
             <DialogContent className="glass-card border-white/10 text-slate-100">
@@ -221,8 +227,8 @@ export default function Home() {
           <div className="h-8 w-px bg-white/10 mx-1" />
           
           <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-white/5 border border-white/10 cursor-pointer hover:bg-white/10 transition-colors">
-            <div className="w-6 h-6 rounded-full bg-primary/40 border border-primary/20 flex items-center justify-center text-[10px] font-bold">JD</div>
-            <span className="font-mono-readout text-[10px]">Nexus_Admin</span>
+            <div className="w-6 h-6 rounded-full bg-primary/40 border border-primary/20 flex items-center justify-center text-[10px] font-bold">NV</div>
+            <span className="font-mono-readout text-[10px]">Operator</span>
           </div>
         </div>
       </header>
@@ -328,7 +334,7 @@ export default function Home() {
             <span className="hidden sm:inline text-primary/60 font-bold">AI_OPERATOR_ACTIVE</span>
         </div>
         <div className="flex items-center gap-4 font-mono-readout text-[8px] text-muted-foreground">
-            <span className="animate-pulse text-primary font-bold uppercase truncate max-w-[200px]">Signal: {url}</span>
+            <span className="animate-pulse text-primary font-bold uppercase truncate max-w-[200px]">Signal: {uplinkLabel}</span>
             <div className="flex items-center gap-2 bg-white/5 px-2 py-0.5 border border-white/10 rounded">
               <span>SYSTEM:V3_AGENTIC</span>
               <div className={cn(
