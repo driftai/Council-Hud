@@ -69,3 +69,23 @@ export function setRuntimeEnvValue(key: string, value: string) {
   });
   process.env[key] = serializedValue;
 }
+
+export function getRuntimeTextValue(key: string) {
+  const encoded = getRuntimeEnvValue(`${key}_B64`);
+  if (!encoded) return "";
+
+  try {
+    return Buffer.from(encoded, "base64").toString("utf8");
+  } catch {
+    return "";
+  }
+}
+
+export function setRuntimeTextValue(key: string, value: string) {
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
+    throw new Error("Invalid environment key name.");
+  }
+
+  const encoded = Buffer.from(value, "utf8").toString("base64");
+  setRuntimeEnvValue(`${key}_B64`, encoded);
+}

@@ -10,8 +10,9 @@ import { NeuralCommand } from "@/components/dashboard/NeuralCommand";
 import { DashboardCard } from "@/components/dashboard/DashboardCard";
 import { Shield, Zap, Bell, Link2, Loader2, Cpu, Lock, Unlock, Radio, X, FileCode, RefreshCcw, Signal, SignalHigh, SignalLow, Sparkles, Key, Edit3, Save, Undo2, AlertTriangle } from "lucide-react";
 import { useNexus } from "@/providers/NexusProvider";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { cn } from "@/lib/utils";
+import type { NvidiaModelOption, NvidiaModelSort } from "@/lib/nvidia-models";
 import {
   Dialog,
   DialogContent,
@@ -25,6 +26,23 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Textarea } from "@/components/ui/textarea";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+
+const MODEL_SORT_LABELS: Record<NvidiaModelSort, string> = {
+  recommended: "Recommended",
+  score: "Usefulness Score",
+  reasoning: "Reasoning",
+  coding: "Coding",
+  speed: "Speed",
+  name: "Name",
+  provider: "Provider",
+};
 
 export default function Home() {
   const {
@@ -55,6 +73,19 @@ export default function Home() {
   const [nvidiaKeyConfigured, setNvidiaKeyConfigured] = useState(false);
   const [isSavingNvidiaKey, setIsSavingNvidiaKey] = useState(false);
   const [nvidiaKeyMessage, setNvidiaKeyMessage] = useState<string | null>(null);
+  const [nvidiaModels, setNvidiaModels] = useState<NvidiaModelOption[]>([]);
+  const [modelSort, setModelSort] = useState<NvidiaModelSort>("recommended");
+  const [selectedNvidiaModel, setSelectedNvidiaModel] = useState("");
+  const [tempNvidiaModel, setTempNvidiaModel] = useState("");
+  const [isLoadingNvidiaModels, setIsLoadingNvidiaModels] = useState(false);
+  const [isSavingNvidiaModel, setIsSavingNvidiaModel] = useState(false);
+  const [nvidiaModelMessage, setNvidiaModelMessage] = useState<string | null>(null);
+  const [activeSystemInstruction, setActiveSystemInstruction] = useState("");
+  const [systemInstructionDraft, setSystemInstructionDraft] = useState("");
+  const [defaultSystemInstruction, setDefaultSystemInstruction] = useState("");
+  const [isLoadingSystemInstruction, setIsLoadingSystemInstruction] = useState(false);
+  const [isSavingSystemInstruction, setIsSavingSystemInstruction] = useState(false);
+  const [systemInstructionMessage, setSystemInstructionMessage] = useState<string | null>(null);
 
   useEffect(() => {
     setTempUrl(url);
@@ -66,23 +97,60 @@ export default function Home() {
     return () => clearInterval(interval);
   }, []);
 
+  const loadNvidiaModels = useCallback(async () => {
+    setIsLoadingNvidiaModels(true);
+    setNvidiaModelMessage(null);
+    try {
+      const response = await fetch(`/api/runtime/nvidia-models?sort=${modelSort}`, { cache: "no-store" });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(data?.error || "Failed to load NVIDIA models.");
+      }
+
+      setNvidiaKeyConfigured(Boolean(data.configured));
+      setNvidiaModels(Array.isArray(data.models) ? data.models : []);
+      setSelectedNvidiaModel(data.selectedModel || "");
+      setTempNvidiaModel(data.selectedModel || "");
+      if (data.error) {
+        setNvidiaModelMessage(data.error);
+      }
+    } catch (error: any) {
+      setNvidiaModels([]);
+      setNvidiaModelMessage(error?.message || "Failed to load NVIDIA models.");
+    } finally {
+      setIsLoadingNvidiaModels(false);
+    }
+  }, [modelSort]);
+
+  const loadSystemInstruction = useCallback(async () => {
+    setIsLoadingSystemInstruction(true);
+    setSystemInstructionMessage(null);
+    try {
+      const response = await fetch("/api/runtime/nexus-system-instruction", { cache: "no-store" });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(data?.error || "Failed to load system instruction.");
+      }
+
+      setActiveSystemInstruction(data.instruction || "");
+      setSystemInstructionDraft(data.instruction || "");
+      setDefaultSystemInstruction(data.defaultInstruction || "");
+    } catch (error: any) {
+      setSystemInstructionMessage(error?.message || "Failed to load system instruction.");
+    } finally {
+      setIsLoadingSystemInstruction(false);
+    }
+  }, []);
+
   useEffect(() => {
     if (!isOpen) return;
+    loadNvidiaModels();
+  }, [isOpen, loadNvidiaModels]);
 
-    let isMounted = true;
-    fetch("/api/runtime/nvidia-key", { cache: "no-store" })
-      .then((response) => response.ok ? response.json() : null)
-      .then((data) => {
-        if (isMounted && data) setNvidiaKeyConfigured(Boolean(data.configured));
-      })
-      .catch(() => {
-        if (isMounted) setNvidiaKeyConfigured(false);
-      });
-
-    return () => {
-      isMounted = false;
-    };
-  }, [isOpen]);
+  useEffect(() => {
+    if (!isOpen) return;
+    loadSystemInstruction();
+  }, [isOpen, loadSystemInstruction]);
 
   useEffect(() => {
     if (!fileContent) {
@@ -123,10 +191,90 @@ export default function Home() {
       setTempNvidiaKey("");
       setNvidiaKeyConfigured(true);
       setNvidiaKeyMessage("NVIDIA key stored in .env.local");
+      await loadNvidiaModels();
     } catch (error: any) {
       setNvidiaKeyMessage(error?.message || "Failed to save NVIDIA API key.");
     } finally {
       setIsSavingNvidiaKey(false);
+    }
+  };
+
+  const handleSaveNvidiaModel = async () => {
+    if (!tempNvidiaModel || isSavingNvidiaModel) return;
+
+    setIsSavingNvidiaModel(true);
+    setNvidiaModelMessage(null);
+    try {
+      const response = await fetch("/api/runtime/nvidia-models", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: tempNvidiaModel }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(data?.error || "Failed to save NVIDIA model.");
+      }
+
+      setSelectedNvidiaModel(data.selectedModel || tempNvidiaModel);
+      setTempNvidiaModel(data.selectedModel || tempNvidiaModel);
+      setNvidiaModelMessage("Neural Command brain model updated.");
+    } catch (error: any) {
+      setNvidiaModelMessage(error?.message || "Failed to save NVIDIA model.");
+    } finally {
+      setIsSavingNvidiaModel(false);
+    }
+  };
+
+  const handleSaveSystemInstruction = async () => {
+    const instruction = systemInstructionDraft.trim();
+    if (!instruction || isSavingSystemInstruction) return;
+
+    setIsSavingSystemInstruction(true);
+    setSystemInstructionMessage(null);
+    try {
+      const response = await fetch("/api/runtime/nexus-system-instruction", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ instruction }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(data?.error || "Failed to save system instruction.");
+      }
+
+      setActiveSystemInstruction(data.instruction || instruction);
+      setSystemInstructionDraft(data.instruction || instruction);
+      setSystemInstructionMessage("System instruction updated.");
+    } catch (error: any) {
+      setSystemInstructionMessage(error?.message || "Failed to save system instruction.");
+    } finally {
+      setIsSavingSystemInstruction(false);
+    }
+  };
+
+  const handleResetSystemInstruction = async () => {
+    if (isSavingSystemInstruction) return;
+
+    setIsSavingSystemInstruction(true);
+    setSystemInstructionMessage(null);
+    try {
+      const response = await fetch("/api/runtime/nexus-system-instruction", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ reset: true }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(data?.error || "Failed to reset system instruction.");
+      }
+
+      setActiveSystemInstruction(data.instruction || defaultSystemInstruction);
+      setSystemInstructionDraft(data.instruction || defaultSystemInstruction);
+      setSystemInstructionMessage("System instruction reset to default.");
+    } catch (error: any) {
+      setSystemInstructionMessage(error?.message || "Failed to reset system instruction.");
+    } finally {
+      setIsSavingSystemInstruction(false);
     }
   };
 
@@ -185,6 +333,12 @@ export default function Home() {
     ? "LOCAL_NEXUS_PROXY"
     : url.replace("https://", "").replace("http://", "");
   const fileHasUnsavedChanges = !!fileContent && draftFileContent !== fileContent.content;
+  const selectableNvidiaModels = nvidiaModels.filter((model) => model.selectable);
+  const selectedModelDetails = nvidiaModels.find((model) => model.id === tempNvidiaModel)
+    || nvidiaModels.find((model) => model.id === selectedNvidiaModel)
+    || null;
+  const selectedModelIsDirty = !!tempNvidiaModel && tempNvidiaModel !== selectedNvidiaModel;
+  const systemInstructionIsDirty = systemInstructionDraft.trim() !== activeSystemInstruction.trim();
 
   return (
     <main className="min-h-screen bg-[#020617] text-slate-100 selection:bg-cyan-500/30 overflow-x-hidden">
@@ -347,7 +501,7 @@ export default function Home() {
                 <span className="font-mono-readout text-[10px] text-primary">Uplink Settings</span>
               </button>
             </DialogTrigger>
-            <DialogContent className="glass-card border-white/10 text-slate-100">
+            <DialogContent className="glass-card max-h-[90vh] overflow-y-auto border-white/10 text-slate-100 sm:max-w-3xl">
               <DialogHeader>
                 <DialogTitle className="font-headline uppercase tracking-widest text-primary">Nexus Configuration</DialogTitle>
                 <DialogDescription className="text-slate-400 font-mono text-xs">
@@ -413,6 +567,195 @@ export default function Home() {
                   )}>
                     {nvidiaKeyMessage || "Stored locally in .env.local for Neural Command."}
                   </p>
+                  <div className="mt-4 border-t border-white/10 pt-4 space-y-3">
+                    <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                      <div>
+                        <p className="text-[10px] font-mono-readout text-muted-foreground uppercase">
+                          Agent Brain Model
+                        </p>
+                        <p className="mt-1 font-mono text-[8px] text-muted-foreground">
+                          {nvidiaModels.length > 0
+                            ? `${selectableNvidiaModels.length}/${nvidiaModels.length} models marked brain-compatible`
+                            : "Fetches live NVIDIA model ids from /v1/models"}
+                        </p>
+                      </div>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        onClick={loadNvidiaModels}
+                        disabled={isLoadingNvidiaModels || !nvidiaKeyConfigured}
+                        className="h-8 shrink-0 border-white/10 bg-transparent text-[10px] uppercase hover:bg-white/5"
+                      >
+                        {isLoadingNvidiaModels ? (
+                          <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" />
+                        ) : (
+                          <RefreshCcw className="mr-2 h-3.5 w-3.5" />
+                        )}
+                        Refresh Models
+                      </Button>
+                    </div>
+
+                    <div className="grid gap-3 md:grid-cols-[170px_1fr_auto] md:items-end">
+                      <div className="space-y-1.5">
+                        <label className="text-[9px] font-mono-readout text-muted-foreground uppercase">
+                          Sort By
+                        </label>
+                        <Select value={modelSort} onValueChange={(value) => setModelSort(value as NvidiaModelSort)}>
+                          <SelectTrigger className="h-9 border-white/10 bg-black/40 font-mono text-[10px] text-slate-100">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent className="border-white/10 bg-[#020617] text-slate-100">
+                            {(Object.keys(MODEL_SORT_LABELS) as NvidiaModelSort[]).map((sortKey) => (
+                              <SelectItem key={sortKey} value={sortKey} className="font-mono text-[10px]">
+                                {MODEL_SORT_LABELS[sortKey]}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </div>
+
+                      <div className="space-y-1.5 min-w-0">
+                        <label className="text-[9px] font-mono-readout text-muted-foreground uppercase">
+                          NVIDIA Model
+                        </label>
+                        <Select
+                          value={tempNvidiaModel || undefined}
+                          onValueChange={(value) => {
+                            setTempNvidiaModel(value);
+                            setNvidiaModelMessage(null);
+                          }}
+                          disabled={isLoadingNvidiaModels || selectableNvidiaModels.length === 0}
+                        >
+                          <SelectTrigger className="h-9 min-w-0 border-white/10 bg-black/40 font-mono text-[10px] text-primary">
+                            <SelectValue placeholder={isLoadingNvidiaModels ? "Loading models..." : "Select model"} />
+                          </SelectTrigger>
+                          <SelectContent className="max-h-72 border-white/10 bg-[#020617] text-slate-100">
+                            {selectableNvidiaModels.map((model) => (
+                              <SelectItem key={model.id} value={model.id} className="font-mono text-[10px]">
+                                {model.id} - {model.score}/100
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </div>
+
+                      <Button
+                        type="button"
+                        onClick={handleSaveNvidiaModel}
+                        disabled={!selectedModelIsDirty || isSavingNvidiaModel}
+                        className="h-9 shrink-0 bg-secondary text-secondary-foreground text-[10px] font-bold uppercase hover:bg-secondary/90"
+                      >
+                        {isSavingNvidiaModel ? <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" /> : <Save className="mr-2 h-3.5 w-3.5" />}
+                        Use Model
+                      </Button>
+                    </div>
+
+                    {selectedModelDetails && (
+                      <div className="rounded border border-primary/10 bg-primary/5 p-3">
+                        <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                          <div className="min-w-0">
+                            <p className="truncate font-mono text-[10px] text-primary">
+                              {selectedModelDetails.id}
+                            </p>
+                            <p className="mt-1 font-mono text-[8px] uppercase text-muted-foreground">
+                              {selectedModelDetails.provider} / {selectedModelDetails.category}
+                            </p>
+                          </div>
+                          <div className="shrink-0 rounded border border-secondary/20 bg-secondary/10 px-2 py-1 font-mono text-[9px] text-secondary">
+                            Score {selectedModelDetails.score}/100
+                          </div>
+                        </div>
+                        <div className="mt-3 flex flex-wrap gap-1.5">
+                          {selectedModelDetails.capabilities.slice(0, 6).map((capability) => (
+                            <span
+                              key={capability}
+                              className="rounded border border-white/10 bg-black/30 px-2 py-0.5 font-mono text-[8px] uppercase text-muted-foreground"
+                            >
+                              {capability}
+                            </span>
+                          ))}
+                        </div>
+                        <p className="mt-2 font-mono text-[8px] leading-relaxed text-muted-foreground">
+                          {selectedModelDetails.rankNote}
+                        </p>
+                      </div>
+                    )}
+
+                    <p className={cn(
+                      "font-mono text-[8px]",
+                      nvidiaModelMessage?.includes("Failed") || nvidiaModelMessage?.includes("not set") || nvidiaModelMessage?.includes("only enabled")
+                        ? "text-destructive"
+                        : "text-muted-foreground"
+                    )}>
+                      {nvidiaModelMessage || "Model id is stored locally in .env.local as NVIDIA_MODEL."}
+                    </p>
+                  </div>
+                  <div className="mt-4 border-t border-white/10 pt-4 space-y-3">
+                    <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                      <div>
+                        <p className="text-[10px] font-mono-readout text-muted-foreground uppercase">
+                          System Instruction
+                        </p>
+                        <p className="mt-1 font-mono text-[8px] text-muted-foreground">
+                          Replaces the active Neural Command instruction. Live status, tree, history, and directive context are appended automatically.
+                        </p>
+                      </div>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        onClick={loadSystemInstruction}
+                        disabled={isLoadingSystemInstruction}
+                        className="h-8 shrink-0 border-white/10 bg-transparent text-[10px] uppercase hover:bg-white/5"
+                      >
+                        {isLoadingSystemInstruction ? (
+                          <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" />
+                        ) : (
+                          <RefreshCcw className="mr-2 h-3.5 w-3.5" />
+                        )}
+                        Reload
+                      </Button>
+                    </div>
+                    <Textarea
+                      value={systemInstructionDraft}
+                      onChange={(event) => {
+                        setSystemInstructionDraft(event.target.value);
+                        setSystemInstructionMessage(null);
+                      }}
+                      spellCheck={false}
+                      className="min-h-[260px] resize-y border-white/10 bg-black/50 font-mono text-[10px] leading-relaxed text-slate-200 focus-visible:ring-primary"
+                    />
+                    <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                      <p className={cn(
+                        "font-mono text-[8px]",
+                        systemInstructionMessage?.includes("Failed") || systemInstructionMessage?.includes("required") || systemInstructionMessage?.includes("large")
+                          ? "text-destructive"
+                          : "text-muted-foreground"
+                      )}>
+                        {systemInstructionMessage || "Stored locally as NEXUS_SYSTEM_INSTRUCTION_B64 in .env.local."}
+                      </p>
+                      <div className="flex shrink-0 justify-end gap-2">
+                        <Button
+                          type="button"
+                          variant="outline"
+                          onClick={handleResetSystemInstruction}
+                          disabled={isSavingSystemInstruction || !defaultSystemInstruction}
+                          className="h-8 border-white/10 bg-transparent text-[10px] uppercase hover:bg-white/5"
+                        >
+                          <Undo2 className="mr-2 h-3.5 w-3.5" />
+                          Reset Default
+                        </Button>
+                        <Button
+                          type="button"
+                          onClick={handleSaveSystemInstruction}
+                          disabled={!systemInstructionIsDirty || isSavingSystemInstruction || !systemInstructionDraft.trim()}
+                          className="h-8 bg-primary text-primary-foreground text-[10px] font-bold uppercase hover:bg-primary/90"
+                        >
+                          {isSavingSystemInstruction ? <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" /> : <Save className="mr-2 h-3.5 w-3.5" />}
+                          Save Instruction
+                        </Button>
+                      </div>
+                    </div>
+                  </div>
                 </div>
               </div>
               <DialogFooter>

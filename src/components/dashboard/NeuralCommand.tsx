@@ -38,6 +38,26 @@ function stripFileContentWrapper(value: string) {
   return trimmed;
 }
 
+function wantsRedaction(directive: string) {
+  const text = directive.toLowerCase();
+  return /\b(redact|redacted|blur|blurr|mask|hide|censor|sanitize)\b/.test(text)
+    || /\bbur\s+out\b/.test(text)
+    || (/\b(important|importnat|sensitive|secret|private)\s+(info|information)\b/.test(text)
+      && /\b(out|hide|blur|redact|mask|remove)\b/.test(text));
+}
+
+function redactSensitiveContent(value: string) {
+  return value
+    .replace(/\bnvapi-[A-Za-z0-9_-]+/g, "[REDACTED_NVIDIA_API_KEY]")
+    .replace(/(api\s*key\s*\d*\s*:\s*)[^\s\r\n]+/gi, "$1[REDACTED]")
+    .replace(/(token\s*:\s*)[^\s\r\n]+/gi, "$1[REDACTED]")
+    .replace(/(secret\s*:\s*)[^\s\r\n]+/gi, "$1[REDACTED]")
+    .replace(/(password\s*:\s*)[^\s\r\n]+/gi, "$1[REDACTED]")
+    .replace(/(codex\s+resume\s+)[A-Za-z0-9-]+/gi, "$1[REDACTED_SESSION]")
+    .replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi, "[REDACTED_ID]")
+    .replace(/\bC:[/\\]Users[/\\][^/\\\r\n]+/gi, "C:/Users/[REDACTED_USER]");
+}
+
 function parseMaybeJsonMessage(value: string) {
   const trimmed = value.trim();
   if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) return null;
@@ -97,20 +117,24 @@ function humanizeObjectMessage(value: Record<string, unknown>) {
     .join("\n");
 }
 
-function humanizeModelMessage(message: string) {
+function humanizeModelMessage(message: string, directive = "") {
   const parsed = parseMaybeJsonMessage(message);
+  let display: string;
   if (parsed && !Array.isArray(parsed) && typeof parsed === "object") {
-    return humanizeObjectMessage(parsed as Record<string, unknown>);
+    display = humanizeObjectMessage(parsed as Record<string, unknown>);
+  } else if (Array.isArray(parsed)) {
+    display = parsed.map((entry) => formatObjectValue(entry)).join("\n");
+  } else {
+    display = normalizePathSeparators(message);
   }
-  if (Array.isArray(parsed)) {
-    return parsed.map((entry) => formatObjectValue(entry)).join("\n");
-  }
-  return normalizePathSeparators(message);
+
+  return wantsRedaction(directive) ? redactSensitiveContent(display) : display;
 }
 
 function wantsInspectorOpen(directive: string, payload: Record<string, any>) {
   const text = directive.toLowerCase();
   if (/\b(don't|dont|do not|without)\s+open/.test(text)) return false;
+  if (wantsRedaction(directive)) return false;
   const asksForContent = /\b(read|tell me|what.*say|content|contents|code\s*word|codeword)\b/.test(text);
   const directiveWantsOpen =
     /\b(open|pull up)\b/.test(text) ||
@@ -146,22 +170,28 @@ function extractCodeword(content: string) {
 }
 
 function shouldAnswerDirectlyFromRead(directive: string) {
-  return /\b(read|tell me|what.*say|what is|what's|content|contents|code\s*word|codeword)\b/i.test(directive);
+  return wantsRedaction(directive)
+    || /\b(read|tell me|what.*say|what is|what's|content|contents|code\s*word|codeword)\b/i.test(directive);
 }
 
 function buildFileReadResponse(directive: string, path: string, content: string, openedInspector: boolean) {
   const fileName = getFileName(path);
   const displayPath = normalizePathSeparators(path);
+  const cleaned = stripFileContentWrapper(content);
+  const shouldRedact = wantsRedaction(directive);
 
-  if (openedInspector) {
+  if (openedInspector && !shouldRedact) {
     return `Opened ${fileName} in Remote_Inspector.\nPath: ${displayPath}`;
+  }
+
+  if (shouldRedact) {
+    return `I read ${fileName}. Redacted important information:\n\n${redactSensitiveContent(cleaned) || "(empty file)"}`;
   }
 
   if (isCodewordDirective(directive)) {
     return `The codeword in ${fileName} is: ${extractCodeword(content)}.`;
   }
 
-  const cleaned = stripFileContentWrapper(content);
   return `I read ${fileName}. It says:\n\n${cleaned || "(empty file)"}`;
 }
 
@@ -226,7 +256,7 @@ export function NeuralCommand() {
 
       const modelMsg: ChatMessage = {
         role: 'model',
-        content: humanizeModelMessage(result.message),
+        content: humanizeModelMessage(result.message, rootDirective),
         command: result.command !== "NONE" ? result.command : undefined,
         timestamp: Date.now()
       };

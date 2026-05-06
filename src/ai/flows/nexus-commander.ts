@@ -8,9 +8,14 @@
  * - Strict Schema Lock: Enforced via Zod.
  */
 
-import { ai } from '@/ai/genkit';
 import { z } from 'genkit';
-import { getRuntimeEnvValue } from '@/lib/runtime-env';
+import { getRuntimeEnvValue, getRuntimeTextValue } from '@/lib/runtime-env';
+import { DEFAULT_NVIDIA_MODEL } from '@/lib/nvidia-models';
+import {
+  buildNexusSystemPrompt,
+  DEFAULT_NEXUS_SYSTEM_INSTRUCTION,
+  NEXUS_SYSTEM_INSTRUCTION_KEY,
+} from '@/lib/nexus-system-instruction';
 
 const MessageSchema = z.object({
   role: z.enum(['user', 'model']),
@@ -196,6 +201,7 @@ function normalizeCommandOutput(parsed: any): NexusCommandOutput {
 export async function nexusCommand(input: NexusCommandInput): Promise<NexusCommandOutput> {
   const NVIDIA_URL = "https://integrate.api.nvidia.com/v1/chat/completions";
   const apiKey = getRuntimeEnvValue("NVIDIA_API_KEY");
+  const selectedModel = getRuntimeEnvValue("NVIDIA_MODEL") || DEFAULT_NVIDIA_MODEL;
 
   if (!apiKey) {
     throw new Error("NVIDIA_API_KEY is not set.");
@@ -209,33 +215,16 @@ export async function nexusCommand(input: NexusCommandInput): Promise<NexusComma
     ? (input.history || []).map(m => `- ${m.role === 'model' ? 'Nexus_Op' : 'User'}: ${m.content}`).join('\n')
     : "No previous conversation history.";
 
-  let systemPrompt = `[SYSTEM_MANDATE]: YOU ARE A RAW JSON API BRIDGE.
-[ROLE]: TRANSLATE human directives into SYSTEM ACTIONS.
-[PLATINUM_PATHING]:
-1. ALWAYS use FORWARD SLASHES (/) for all paths (e.g., C:/Users/USERNAME/Documents).
-2. NEVER guess the content of a file. 
-3. If "Last Read File Content" is provided below, you MUST use it to answer.
-4. Respond with PURE JSON ONLY. 
-5. The message field MUST be valid JSON string content: escape quotes, backslashes, and line breaks instead of writing raw multi-line text inside the JSON.
-6. The message field MUST be readable natural language. NEVER put an object, array, or stringified JSON inside message.
-7. Resolve follow-up references like "it", "that file", "inside it", "the text file", and "read it again" from HISTORY, Directory Tree, Workspace, and Last Read File Path.
-8. If the user asks to read a file again, open a file here, view a file, or asks what a current file says, issue READ_FILE instead of answering from stale Last Read File Content.
-9. If a referenced folder contains one matching text file, use that exact path instead of demanding that the user provide a full path.
-10. If the user asks to open/show/view a file here, use command READ_FILE and include payload.openInspector=true.
-
-[OUTPUT_RULES]:
-- Response format: {"thought": "...", "command": "READ_FILE|NONE|...", "payload": {"path": "..."}, "message": "..."}
-
-STATUS:
-- Workspace: ${input.context.workingDirectory || 'C:/'}
-- Directory Tree: ${treeStr}
-- Last Read File Path: ${lastFilePath}
-- Last Read File Content: """${lastFileContent}"""
-
-HISTORY:
-${historySection}
-
-USER DIRECTIVE: "${input.prompt}"`;
+  const systemInstruction = getRuntimeTextValue(NEXUS_SYSTEM_INSTRUCTION_KEY) || DEFAULT_NEXUS_SYSTEM_INSTRUCTION;
+  const systemPrompt = buildNexusSystemPrompt({
+    instruction: systemInstruction,
+    workspace: input.context.workingDirectory || 'C:/',
+    treeStr,
+    lastFilePath,
+    lastFileContent,
+    historySection,
+    userDirective: input.prompt,
+  });
 
   try {
     const response = await fetch(NVIDIA_URL, {
@@ -245,7 +234,7 @@ USER DIRECTIVE: "${input.prompt}"`;
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        model: "mistralai/ministral-14b-instruct-2512",
+        model: selectedModel,
         messages: [
           { role: "system", content: systemPrompt },
           { role: "user", content: input.prompt }
