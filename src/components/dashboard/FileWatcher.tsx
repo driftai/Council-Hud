@@ -41,10 +41,9 @@ function formatPathLabel(value: string) {
 }
 
 function getVisibleRootPath(fileTree: unknown) {
-  if (!Array.isArray(fileTree) || fileTree.length !== 1) return "";
-  const rootNode = fileTree[0] as Partial<FileNode>;
-  const isFolder = rootNode.type === "folder" || rootNode.type === "directory";
-  return isFolder && typeof rootNode.path === "string" ? rootNode.path : "";
+  if (!Array.isArray(fileTree) || fileTree.length === 0) return "";
+  const firstNode = fileTree[0] as Partial<FileNode>;
+  return typeof firstNode.path === "string" ? getParentPath(firstNode.path) : "";
 }
 
 function FileTreeItem({
