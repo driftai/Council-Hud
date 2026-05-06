@@ -73,6 +73,8 @@ This project, and the broader "agentic vibe" that drives it, was born from the f
 
 OpenClaw provided the initial spark for autonomous AI experimentation and remains the spiritual predecessor to the Council HUD architecture. We honor the heritage of the OpenClaw ecosystem as we push the boundaries of neural-to-hardware interoperability.
 
+Additional agents that worked on this project: Nova, Astro.
+
 ---
 **[SIGNAL_STATUS]**: GOLDEN_STATE  
 **[ENCRYPTION]**: AES-256-NEXUS  
