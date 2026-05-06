@@ -6,8 +6,14 @@ import { DashboardCard } from "./DashboardCard";
 import { Terminal, Cpu, FileJson, Brain, Zap, Trash2, FileText, Code, Sparkles, Copy, Check } from "lucide-react";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { cn } from "@/lib/utils";
+import { getNexusLogLabel, getNexusLogSignal, summarizeNexusPayload } from "@/lib/nexus/logging";
 
 const TYPE_ICONS: Record<string, any> = {
+  HARDWARE_PULSE: Cpu,
+  PROCESS_GRAPH: Brain,
+  FILE_READ: FileText,
+  FILE_WRITE: Code,
+  EXEC_OUTPUT: Terminal,
   HARDWARE: Cpu,
   FILESYSTEM: FileJson,
   COGNITIVE_LOG: Brain,
@@ -18,6 +24,11 @@ const TYPE_ICONS: Record<string, any> = {
 };
 
 const TYPE_COLORS: Record<string, string> = {
+  HARDWARE_PULSE: "text-secondary",
+  PROCESS_GRAPH: "text-green-400",
+  FILE_READ: "text-yellow-400",
+  FILE_WRITE: "text-orange-400",
+  EXEC_OUTPUT: "text-purple-400",
   HARDWARE: "text-secondary",
   FILESYSTEM: "text-primary",
   COGNITIVE_LOG: "text-purple-400",
@@ -38,12 +49,7 @@ export function NexusLogs() {
 
     const logText = nexusLogs.map(log => {
       const timestamp = new Date(log.timestamp).toLocaleTimeString();
-      const payloadString = typeof log.payload === 'string' 
-        ? log.payload 
-        : log.type === 'FILE_CONTENT' 
-          ? `READ: ${log.payload?.filepath || 'Unknown'}` 
-          : JSON.stringify(log.payload || {});
-      return `[${timestamp}] ${log.type}: ${payloadString}`;
+      return `[${timestamp}] ${getNexusLogLabel(log.type)}: ${summarizeNexusPayload(log.payload, 160)}`;
     }).join('\n');
 
     navigator.clipboard.writeText(logText).then(() => {
@@ -103,6 +109,7 @@ export function NexusLogs() {
             nexusLogs.map((log, i) => {
               const Icon = TYPE_ICONS[log.type] || Terminal;
               const color = TYPE_COLORS[log.type] || TYPE_COLORS.GENERIC;
+              const label = getNexusLogSignal(log.type);
               
               return (
                 <div key={i} className="flex gap-3 group animate-in fade-in slide-in-from-left-2 duration-300">
@@ -114,18 +121,14 @@ export function NexusLogs() {
                   )}>
                     <div className="flex items-center justify-between mb-0.5">
                       <span className={cn("font-bold uppercase tracking-widest", color)}>
-                        {log.type}
+                        {label}
                       </span>
                       <span className="text-muted-foreground text-[8px]">
                         {new Date(log.timestamp).toLocaleTimeString()}
                       </span>
                     </div>
                     <p className="text-foreground/80 break-words line-clamp-2 italic">
-                      {typeof log.payload === 'string' 
-                        ? log.payload 
-                        : log.type === 'FILE_CONTENT' 
-                          ? `READ: ${log.payload?.filepath?.split('\\').pop() || 'Unknown'}`
-                          : (log.payload ? JSON.stringify(log.payload) : 'No Data').substring(0, 100)}
+                      {summarizeNexusPayload(log.payload, 120)}
                     </p>
                   </div>
                 </div>

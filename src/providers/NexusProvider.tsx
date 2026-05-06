@@ -4,6 +4,7 @@
 import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from "react";
 import { useUplink } from "@/hooks/use-uplink";
 import { NexusClient, NexusEnvelope } from "@/lib/nexus/NexusClient";
+import { classifyNexusPacket } from "@/lib/nexus/logging";
 
 export type ConnectionState = "OFFLINE" | "HANDSHAKE" | "SYNCING" | "LINKED" | "RE-SYNCING";
 
@@ -104,11 +105,11 @@ export function NexusProvider({ children }: { children: React.ReactNode }) {
     }
   }, [url]);
 
-  const addLog = useCallback((envelope: NexusEnvelope<any>) => {
+  const addLog = useCallback((envelope: NexusEnvelope<any>, fallbackType?: string) => {
     setNexusLogs(prev => {
       const newLog: NexusLog = {
         timestamp: envelope.header?.timestamp || new Date().toISOString(),
-        type: envelope.header?.type || "GENERIC",
+        type: classifyNexusPacket(envelope.payload, envelope.header?.type, fallbackType),
         payload: envelope.payload
       };
       if (prev.length > 0 && prev[0].timestamp === newLog.timestamp && prev[0].type === newLog.type) {
@@ -140,10 +141,9 @@ export function NexusProvider({ children }: { children: React.ReactNode }) {
 
     try {
       // PROMPT: Always include workingDirectory to prevent "NO PATH" warnings
-      const [health, graph, files, tree] = await Promise.allSettled([
+      const [health, graph, tree] = await Promise.allSettled([
         clientRef.current.fetchEnvelope<any>("/health"),
         clientRef.current.fetchEnvelope<any>("/graph"),
-        clientRef.current.fetchEnvelope<any>("/filesystem"),
         clientRef.current.fetchEnvelope<any>("/filesystem/tree", { 
           method: 'POST', 
           body: { path: workingDirectory } // STICKY_SYNC
@@ -155,23 +155,13 @@ export function NexusProvider({ children }: { children: React.ReactNode }) {
       if (health.status === "fulfilled") {
         setSystemHealth(health.value.payload);
         setStatus(health.value.header?.status || "STABLE");
-        addLog(health.value);
+        addLog(health.value, "HARDWARE_PULSE");
         anySuccess = true;
       }
 
       if (graph.status === "fulfilled") {
         setKnowledgeGraph(graph.value.payload);
-        addLog(graph.value);
-        anySuccess = true;
-      }
-
-      if (files.status === "fulfilled") {
-        setFileChanges(prev => {
-          const newFiles = files.value.payload?.files || [];
-          const uniqueNewFiles = newFiles.filter((nf: any) => !prev.some(pf => pf.timestamp === nf.timestamp && pf.filename === nf.filename));
-          return [...uniqueNewFiles, ...prev].slice(0, 10);
-        });
-        addLog(files.value);
+        addLog(graph.value, "PROCESS_GRAPH");
         anySuccess = true;
       }
 
@@ -239,6 +229,10 @@ export function NexusProvider({ children }: { children: React.ReactNode }) {
           ? treeResult
           : (treeResult.payload?.tree || treeResult.payload || treeResult.tree || []);
         setFileTree(cleanTree);
+        addManualLog("FILESYSTEM_TREE", {
+          path: payload.reset ? "Nexus Root" : (payload.path || "Nexus Root"),
+          roots: Array.isArray(cleanTree) ? cleanTree.length : 0,
+        });
       } else {
         fetchData();
       }
@@ -258,7 +252,7 @@ export function NexusProvider({ children }: { children: React.ReactNode }) {
 
       if (content !== undefined) {
         setFileContent({ path: filepath, content: content });
-        addManualLog("FILESYSTEM", `Peek Protocol: Retrieval successful from ${path}`);
+        addManualLog("FILE_READ", { path: filepath, bytes: String(content).length });
         return content;
       }
       throw new Error(response?.error || "Empty response from node.");
@@ -273,7 +267,7 @@ export function NexusProvider({ children }: { children: React.ReactNode }) {
     try {
       await sendCommand("WRITE_FILE", { path, content });
       setFileContent(prev => prev?.path === path ? { path: prev.path, content } : prev);
-      addManualLog("FILESYSTEM", `Scribe Protocol: Written to ${path}`);
+      addManualLog("FILE_WRITE", { path, bytes: content.length });
     } catch (e: any) {
       addManualLog("ERROR", `Scribe Failure: ${e.message}`);
       throw e;

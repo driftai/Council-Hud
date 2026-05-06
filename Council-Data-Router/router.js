@@ -425,7 +425,7 @@ app.get(['/', '/health'], (req, res) => {
         uptime: LATEST_STATS.uptime,
         last_sync: LATEST_STATS.last_sync,
         protocol: "V16.0 Pulse Engine"
-    }));
+    }, 'STABLE', 'HARDWARE_PULSE'));
 });
 
 app.get('/graph', requireAuth, async (req, res) => {
@@ -434,7 +434,7 @@ app.get('/graph', requireAuth, async (req, res) => {
         const nodes = processes.list.sort((a, b) => b.cpu - a.cpu).slice(0, 10).map(p => ({ 
             id: p.pid, name: p.name, type: 'PROCESS', usage: p.cpu 
         }));
-        res.json(wrap({ nodes, total_threads: processes.all }));
+        res.json(wrap({ nodes, total_threads: processes.all }, 'STABLE', 'PROCESS_GRAPH'));
     } catch (e) { res.status(500).json({ error: "Graph Fault" }); }
 });
 
@@ -468,8 +468,8 @@ app.all(['/filesystem/tree', '/tree', '/filesystem'], requireAuth, async (req, r
                 process.stdout.write('\x1b[34m.\x1b[0m'); 
             }
         }
-        res.json(tree);
-    } catch (e) { res.json([]); }
+        res.json(wrap({ tree, path: currentTarget, depth: maxDepth }, 'STABLE', 'FILESYSTEM_TREE'));
+    } catch (e) { res.json(wrap({ tree: [], path: currentTarget, depth: maxDepth }, 'DEGRADED', 'FILESYSTEM_TREE')); }
 });
 
 app.post(['/set-path', '/nexus/command'], requireAuth, (req, res) => {
@@ -479,7 +479,7 @@ app.post(['/set-path', '/nexus/command'], requireAuth, (req, res) => {
         currentTarget = translatePath(newPath);
         saveConfig(newPath);
         console.log(`\n\x1b[33m[COMMAND]\x1b[0m Target Shift: ${currentTarget}`);
-        res.json({ status: "SUCCESS" });
+        res.json(wrap({ status: "SUCCESS", command: "SET_PATH", path: currentTarget }, 'STABLE', 'COMMAND'));
     } else {
         res.status(400).json({ error: "Invalid Directive" });
     }
@@ -491,7 +491,7 @@ app.post(['/read-file', '/read-local'], requireAuth, (req, res) => {
     const target = translatePath(requestedPath);
     try {
         const content = fs.readFileSync(target, 'utf8');
-        res.json(wrap({ content, path: target }));
+        res.json(wrap({ content, path: target }, 'STABLE', 'FILE_READ'));
     } catch (e) { res.status(404).json({ error: "Not Found" }); }
 });
 
@@ -504,7 +504,7 @@ app.post('/write-file', requireAuth, (req, res) => {
     try {
         if (!fs.existsSync(path.dirname(target))) fs.mkdirSync(path.dirname(target), { recursive: true });
         fs.writeFileSync(target, req.body.content, 'utf8');
-        res.json({ status: "success" });
+        res.json(wrap({ status: "success", path: target, bytes: Buffer.byteLength(req.body.content, 'utf8') }, 'STABLE', 'FILE_WRITE'));
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -515,7 +515,7 @@ app.post('/exec', requireAuth, (req, res) => {
     const cwd = firstString(req.body?.cwd);
     const targetDir = translatePath(cwd) || currentTarget;
     exec(command, { cwd: targetDir, maxBuffer: 1024*1024*10 }, (error, stdout, stderr) => {
-        res.json(wrap({ output: stdout, stderr, exitCode: error ? error.code : 0 }));
+        res.json(wrap({ output: stdout, stderr, exitCode: error ? error.code : 0 }, error ? 'DEGRADED' : 'STABLE', 'EXEC_OUTPUT'));
     });
 });
 

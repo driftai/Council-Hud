@@ -5,6 +5,7 @@ import { DashboardCard } from "./DashboardCard";
 import { Activity, Brain } from "lucide-react";
 import { useNexus } from "@/providers/NexusProvider";
 import { cn } from "@/lib/utils";
+import { getNexusLogLabel, summarizeNexusPayload } from "@/lib/nexus/logging";
 
 type ProcessPulse = {
   id: string;
@@ -14,7 +15,10 @@ type ProcessPulse = {
 
 type EventPulse = {
   type: string;
+  label: string;
   strength: number;
+  timestamp: string;
+  payloadPreview: string;
 };
 
 type PatternFrame = {
@@ -40,8 +44,11 @@ type HitTarget = {
   label: string;
   detail: string;
   color: string;
+  meta?: string[];
   align?: "left" | "right";
 };
+
+const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5));
 
 function toNumber(value: unknown) {
   const reading = Number(value);
@@ -50,6 +57,12 @@ function toNumber(value: unknown) {
 
 function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
+}
+
+function formatPacketTime(timestamp: string) {
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) return "Time: unknown";
+  return `Time: ${date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}`;
 }
 
 function eventColor(type: string) {
@@ -114,7 +127,10 @@ export function NeuralVisualizer() {
     const recent = nexusLogs.slice(0, 10);
     return recent.map((log, index) => ({
       type: log.type || "PACKET",
+      label: getNexusLogLabel(log.type || "PACKET"),
       strength: 1 - index * 0.07,
+      timestamp: log.timestamp || "",
+      payloadPreview: summarizeNexusPayload(log.payload, 92),
     }));
   }, [nexusLogs]);
 
@@ -201,8 +217,9 @@ export function NeuralVisualizer() {
           }));
 
       processStream.forEach((process, index) => {
-        const angle = (index / Math.max(1, processStream.length)) * Math.PI * 2 + time / (7200 + index * 250);
-        const lane = 74 + (index % 3) * 24;
+        const laneIndex = index % 3;
+        const angle = index * GOLDEN_ANGLE + laneIndex * 0.42 + time / 7600;
+        const lane = 70 + laneIndex * 25;
         const x = centerX + Math.cos(angle) * lane;
         const y = centerY + Math.sin(angle) * lane;
         const pointerDistance = pointer.active ? Math.hypot(x - pointer.x, y - pointer.y) : 999;
@@ -281,18 +298,22 @@ export function NeuralVisualizer() {
         ctx.save();
         ctx.translate(x + barWidth - 4, y - 4);
         ctx.rotate(-Math.PI / 4);
-        ctx.fillText(event.type.slice(0, 10), 0, 0);
+        ctx.fillText(event.label.slice(0, 12), 0, 0);
         ctx.restore();
 
         nextTargets.push({
           id: targetId,
           kind: "event",
-          x,
-          y,
-          width: barWidth,
-          height: heightScale,
-          label: event.type,
-          detail: `Packet strength ${Math.round(event.strength * 100)}%`,
+          x: x - 8,
+          y: y - 10,
+          width: barWidth + 16,
+          height: heightScale + 18,
+          label: event.label,
+          detail: `Strength ${Math.round(event.strength * 100)}%`,
+          meta: [
+            formatPacketTime(event.timestamp),
+            event.payloadPreview,
+          ],
           color: "text-primary",
         });
       });
@@ -337,7 +358,7 @@ export function NeuralVisualizer() {
     setHoverTarget(null);
   };
 
-  const eventTags = events.slice(0, 4).map((event) => event.type);
+  const eventTags = events.slice(0, 4).map((event) => event.label);
 
   return (
     <DashboardCard
@@ -366,7 +387,7 @@ export function NeuralVisualizer() {
 
         {hoverTarget && (
           <div
-            className="pointer-events-none absolute z-20 min-w-[150px] max-w-[220px] rounded border border-primary/20 bg-black/85 p-2 font-mono uppercase shadow-[0_0_18px_rgba(0,255,255,0.12)] backdrop-blur-sm"
+            className="pointer-events-none absolute z-20 min-w-[170px] max-w-[280px] rounded border border-primary/20 bg-black/85 p-2 font-mono shadow-[0_0_18px_rgba(0,255,255,0.12)] backdrop-blur-sm"
             data-pattern-tooltip
             style={{
               left: `${hoverTarget.x}px`,
@@ -374,11 +395,16 @@ export function NeuralVisualizer() {
               transform: hoverTarget.align === "left" ? "translate(-105%, -105%)" : "translate(12px, -105%)",
             }}
           >
-            <div className={cn("text-[8px] tracking-widest", hoverTarget.color)}>
+            <div className={cn("text-[8px] uppercase tracking-widest", hoverTarget.color)}>
               {hoverTarget.kind === "process" ? "Process Node" : "Packet Bar"}
             </div>
             <div className="mt-1 truncate text-[10px] font-bold text-foreground">{hoverTarget.label}</div>
-            <div className="mt-1 text-[8px] tracking-wider text-muted-foreground">{hoverTarget.detail}</div>
+            <div className="mt-1 text-[8px] uppercase tracking-wider text-muted-foreground">{hoverTarget.detail}</div>
+            {hoverTarget.meta?.map((line, index) => (
+              <div key={`${hoverTarget.id}-meta-${index}`} className="mt-1 break-words text-[8px] leading-relaxed text-muted-foreground/90">
+                {line}
+              </div>
+            ))}
           </div>
         )}
 

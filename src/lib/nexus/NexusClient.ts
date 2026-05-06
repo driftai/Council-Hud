@@ -12,7 +12,7 @@ export interface NexusHeader {
   priority: "REALTIME" | "BATCH" | "LOW" | "BACKGROUND";
   schema_version: string;
   status: "STABLE" | "DEGRADED" | "SYNCING";
-  type?: "HARDWARE" | "GRAPH" | "FILESYSTEM" | "FILESYSTEM_TREE" | "COGNITIVE_LOG" | "FILE_CONTENT";
+  type?: string;
 }
 
 export interface NexusEnvelope<T> {

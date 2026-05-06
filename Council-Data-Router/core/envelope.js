@@ -1,6 +1,6 @@
 ﻿const { v4: uuidv4 } = require('uuid');
 
-module.exports = function wrap(payload, status = 'STABLE') {
+module.exports = function wrap(payload, status = 'STABLE', type = 'NEXUS_PACKET') {
     return {
         header: {
             node_id: "WSL-ALVIN-NODE-01",
@@ -8,7 +8,8 @@ module.exports = function wrap(payload, status = 'STABLE') {
             timestamp: new Date().toISOString(),
             schema_version: "2.0.0",
             status: status,
-            priority: "REALTIME"
+            priority: "REALTIME",
+            type
         },
         payload: payload
     };
