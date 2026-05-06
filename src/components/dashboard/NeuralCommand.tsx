@@ -5,7 +5,7 @@ import { useState, useRef, useEffect } from "react";
 import { DashboardCard } from "./DashboardCard";
 import { Terminal, Send, Loader2, Sparkles, AlertCircle, Brain, Command } from "lucide-react";
 import { useNexus } from "@/providers/NexusProvider";
-import { nexusCommand, type NexusCommandOutput } from "@/ai/flows/nexus-commander";
+import { nexusCommand } from "@/ai/flows/nexus-commander";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -18,6 +18,153 @@ type ChatMessage = {
   timestamp: number;
 };
 
+type ReadFileSnapshot = {
+  path: string;
+  content: string;
+};
+
+function normalizePathSeparators(path: string) {
+  return path.replace(/\\/g, "/");
+}
+
+function getFileName(path: string) {
+  return normalizePathSeparators(path).split("/").filter(Boolean).pop() || path;
+}
+
+function stripFileContentWrapper(value: string) {
+  const trimmed = value.trim();
+  const tripleQuoted = trimmed.match(/^"""([\s\S]*)"""$/);
+  if (tripleQuoted) return tripleQuoted[1].trim();
+  return trimmed;
+}
+
+function parseMaybeJsonMessage(value: string) {
+  const trimmed = value.trim();
+  if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) return null;
+
+  const attempts = [
+    trimmed,
+    trimmed.replace(/\\(?!["\\/bfnrtu])/g, "/"),
+  ];
+
+  for (const attempt of attempts) {
+    try {
+      return JSON.parse(attempt);
+    } catch {
+      continue;
+    }
+  }
+
+  return null;
+}
+
+function formatObjectValue(value: unknown): string {
+  if (typeof value === "string") return normalizePathSeparators(value);
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (value === null || value === undefined) return "";
+  return JSON.stringify(value, null, 2);
+}
+
+function humanizeObjectMessage(value: Record<string, unknown>) {
+  if (typeof value.file_content === "string") {
+    return `File content:\n\n${stripFileContentWrapper(value.file_content)}`;
+  }
+
+  if (typeof value.codeword === "string") {
+    return `Codeword: ${stripFileContentWrapper(value.codeword)}`;
+  }
+
+  if (typeof value.error === "string") {
+    return value.status ? `${value.error}\nStatus: ${formatObjectValue(value.status)}` : value.error;
+  }
+
+  if (typeof value.description === "string" || typeof value.visible === "boolean") {
+    const description = typeof value.description === "string"
+      ? value.description
+      : value.visible
+        ? "Yes, it is visible."
+        : "No, it is not visible.";
+    const path = typeof value.path === "string" ? `\nPath: ${normalizePathSeparators(value.path)}` : "";
+    return `${description}${path}`;
+  }
+
+  if (typeof value.action === "string" && typeof value.file_path === "string") {
+    return `Reading ${getFileName(value.file_path)}...\nPath: ${normalizePathSeparators(value.file_path)}`;
+  }
+
+  return Object.entries(value)
+    .map(([key, entry]) => `${key.replace(/_/g, " ")}: ${formatObjectValue(entry)}`)
+    .join("\n");
+}
+
+function humanizeModelMessage(message: string) {
+  const parsed = parseMaybeJsonMessage(message);
+  if (parsed && !Array.isArray(parsed) && typeof parsed === "object") {
+    return humanizeObjectMessage(parsed as Record<string, unknown>);
+  }
+  if (Array.isArray(parsed)) {
+    return parsed.map((entry) => formatObjectValue(entry)).join("\n");
+  }
+  return normalizePathSeparators(message);
+}
+
+function wantsInspectorOpen(directive: string, payload: Record<string, any>) {
+  const text = directive.toLowerCase();
+  if (/\b(don't|dont|do not|without)\s+open/.test(text)) return false;
+  const asksForContent = /\b(read|tell me|what.*say|content|contents|code\s*word|codeword)\b/.test(text);
+  const directiveWantsOpen =
+    /\b(open|pull up)\b/.test(text) ||
+    (!asksForContent && /\b(show|view|display)\b/.test(text));
+
+  const payloadSignals = [
+    payload.openInspector,
+    payload.open_inspector,
+    payload.viewer,
+    payload.mode,
+    payload.action,
+  ].map((value) => String(value ?? "").toLowerCase());
+
+  return (
+    payload.openInspector === true ||
+    payload.open_inspector === true ||
+    payloadSignals.some((value) => /\b(open|show|view|display|inspector)\b/.test(value)) ||
+    directiveWantsOpen
+  );
+}
+
+function isCodewordDirective(directive: string) {
+  return /\bcode\s*word\b|\bcodeword\b/i.test(directive);
+}
+
+function extractCodeword(content: string) {
+  const cleaned = stripFileContentWrapper(content);
+  const labeled = cleaned.match(/code\s*word\s*[:=-]\s*["']?(.+?)["']?\s*$/im);
+  if (labeled) return stripFileContentWrapper(labeled[1]).replace(/^["']|["']$/g, "");
+
+  const firstMeaningfulLine = cleaned.split(/\r?\n/).map((line) => line.trim()).find(Boolean);
+  return (firstMeaningfulLine || cleaned || "(empty file)").replace(/^["']|["']$/g, "");
+}
+
+function shouldAnswerDirectlyFromRead(directive: string) {
+  return /\b(read|tell me|what.*say|what is|what's|content|contents|code\s*word|codeword)\b/i.test(directive);
+}
+
+function buildFileReadResponse(directive: string, path: string, content: string, openedInspector: boolean) {
+  const fileName = getFileName(path);
+  const displayPath = normalizePathSeparators(path);
+
+  if (openedInspector) {
+    return `Opened ${fileName} in Remote_Inspector.\nPath: ${displayPath}`;
+  }
+
+  if (isCodewordDirective(directive)) {
+    return `The codeword in ${fileName} is: ${extractCodeword(content)}.`;
+  }
+
+  const cleaned = stripFileContentWrapper(content);
+  return `I read ${fileName}. It says:\n\n${cleaned || "(empty file)"}`;
+}
+
 export function NeuralCommand() {
   const nexus = useNexus();
   const { state, knowledgeGraph, fileTree, systemHealth, url, addManualLog, fileContent, workingDirectory } = nexus;
@@ -25,6 +172,7 @@ export function NeuralCommand() {
   const [prompt, setPrompt] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [lastAgentReadFile, setLastAgentReadFile] = useState<ReadFileSnapshot | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -42,7 +190,8 @@ export function NeuralCommand() {
     input: string,
     historySeed: ChatMessage[],
     isSilent: boolean = false,
-    rootDirective: string = input
+    rootDirective: string = input,
+    readFileOverride: ReadFileSnapshot | null = null
   ) => {
     let localHistory = [...historySeed];
     
@@ -60,6 +209,7 @@ export function NeuralCommand() {
         role: m.role,
         content: m.content
       }));
+      const contextReadFile = readFileOverride || lastAgentReadFile || fileContent || undefined;
 
       const result = await nexusCommand({
         prompt: input,
@@ -70,13 +220,13 @@ export function NeuralCommand() {
           systemHealth: systemHealth || {},
           currentUrl: url,
           workingDirectory: workingDirectory || "C:/",
-          lastReadFile: fileContent ? { path: fileContent.path, content: fileContent.content } : undefined
+          lastReadFile: contextReadFile ? { path: contextReadFile.path, content: contextReadFile.content } : undefined
         }
       });
 
       const modelMsg: ChatMessage = {
         role: 'model',
-        content: result.message,
+        content: humanizeModelMessage(result.message),
         command: result.command !== "NONE" ? result.command : undefined,
         timestamp: Date.now()
       };
@@ -93,10 +243,25 @@ export function NeuralCommand() {
       // --- SYNCHRONOUS HANDSHAKE LOOP ---
       if (result.command === "READ_FILE" && result.payload?.path) {
         const readPath = String(result.payload.path);
+        const openInspector = wantsInspectorOpen(rootDirective, result.payload);
         addManualLog("COMMAND", `Executing READ_FILE: ${readPath}`);
         try {
-          const content = await nexus.readFile(readPath, { openInspector: false });
+          const content = await nexus.readFile(readPath, { openInspector });
           if (content !== null) {
+            const readSnapshot = { path: readPath, content };
+            setLastAgentReadFile(readSnapshot);
+            const readResponse: ChatMessage = {
+              role: 'model',
+              content: buildFileReadResponse(rootDirective, readPath, content, openInspector),
+              timestamp: Date.now()
+            };
+            localHistory = [...localHistory, readResponse];
+            setMessages([...localHistory]);
+
+            if (openInspector || shouldAnswerDirectlyFromRead(rootDirective)) {
+              return;
+            }
+
             // RECURSIVE TURN: Content injected immediately into localHistory accumulator
             await processAiTurn(
               `SYSTEM_FEEDBACK: File retrieved from ${readPath}.
@@ -111,7 +276,8 @@ ${content}
 Answer the original directive using this file content. Do not open the file inspector. Do not request another file read unless a different file is required.`,
               localHistory,
               true,
-              rootDirective
+              rootDirective,
+              readSnapshot
             );
           }
         } catch (readError: any) {
@@ -125,7 +291,8 @@ ${rootDirective}
 Tell the user the file could not be read and include the failure reason.`,
             localHistory,
             true,
-            rootDirective
+            rootDirective,
+            readFileOverride
           );
         }
       } else if (result.command !== "NONE") {
@@ -189,7 +356,7 @@ Tell the user the file could not be read and include the failure reason.`,
                     </div>
                   )}
                 </div>
-                <div className={cn("max-w-[90%] p-2 rounded-lg font-mono text-[10px] leading-relaxed", msg.role === 'user' ? "bg-secondary/10 border border-secondary/30 text-secondary shadow-[0_0_14px_rgba(34,197,94,0.08)]" : "bg-primary/5 border border-primary/10 text-foreground/90 italic")}>
+                <div className={cn("max-w-[90%] whitespace-pre-wrap break-words p-2 rounded-lg font-mono text-[10px] leading-relaxed", msg.role === 'user' ? "bg-secondary/10 border border-secondary/30 text-secondary shadow-[0_0_14px_rgba(34,197,94,0.08)]" : "bg-primary/5 border border-primary/10 text-foreground/90 italic")}>
                   {msg.content.startsWith('SYSTEM_FEEDBACK') ? 'Processing neural data...' : msg.content}
                 </div>
               </div>
