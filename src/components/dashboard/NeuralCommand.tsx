@@ -23,6 +23,13 @@ type ReadFileSnapshot = {
   content: string;
 };
 
+type FileTreeNode = {
+  name?: string;
+  path?: string;
+  type?: string;
+  children?: FileTreeNode[];
+};
+
 function normalizePathSeparators(path: string) {
   return path.replace(/\\/g, "/");
 }
@@ -44,6 +51,24 @@ function wantsRedaction(directive: string) {
     || /\bbur\s+out\b/.test(text)
     || (/\b(important|importnat|sensitive|secret|private)\s+(info|information)\b/.test(text)
       && /\b(out|hide|blur|redact|mask|remove)\b/.test(text));
+}
+
+function wantsPlainOutput(directive: string) {
+  const text = directive.toLowerCase();
+  return /\b(unredacted|no redaction|without redaction|plain extract|raw extract|show the sensitive|show sensitive)\b/.test(text);
+}
+
+function shouldRedactForTurn(rootDirective: string, history: ChatMessage[]) {
+  if (wantsPlainOutput(rootDirective)) return false;
+  if (wantsRedaction(rootDirective)) return true;
+
+  const recentUserText = history
+    .filter((message) => message.role === "user")
+    .slice(-4)
+    .map((message) => message.content)
+    .join("\n");
+  const currentContinuesFileRequest = /\b(it|that|file|read|info|content|send|again|dont open|don't open)\b/i.test(rootDirective);
+  return currentContinuesFileRequest && wantsRedaction(recentUserText) && !wantsPlainOutput(recentUserText);
 }
 
 function redactSensitiveContent(value: string) {
@@ -117,7 +142,7 @@ function humanizeObjectMessage(value: Record<string, unknown>) {
     .join("\n");
 }
 
-function humanizeModelMessage(message: string, directive = "") {
+function humanizeModelMessage(message: string, shouldRedact = false) {
   const parsed = parseMaybeJsonMessage(message);
   let display: string;
   if (parsed && !Array.isArray(parsed) && typeof parsed === "object") {
@@ -128,13 +153,13 @@ function humanizeModelMessage(message: string, directive = "") {
     display = normalizePathSeparators(message);
   }
 
-  return wantsRedaction(directive) ? redactSensitiveContent(display) : display;
+  return shouldRedact ? redactSensitiveContent(display) : display;
 }
 
-function wantsInspectorOpen(directive: string, payload: Record<string, any>) {
+function wantsInspectorOpen(directive: string, payload: Record<string, any>, shouldRedact = false) {
   const text = directive.toLowerCase();
   if (/\b(don't|dont|do not|without)\s+open/.test(text)) return false;
-  if (wantsRedaction(directive)) return false;
+  if (shouldRedact) return false;
   const asksForContent = /\b(read|tell me|what.*say|content|contents|code\s*word|codeword)\b/.test(text);
   const directiveWantsOpen =
     /\b(open|pull up)\b/.test(text) ||
@@ -169,16 +194,136 @@ function extractCodeword(content: string) {
   return (firstMeaningfulLine || cleaned || "(empty file)").replace(/^["']|["']$/g, "");
 }
 
-function shouldAnswerDirectlyFromRead(directive: string) {
-  return wantsRedaction(directive)
+function shouldAnswerDirectlyFromRead(directive: string, shouldRedact = false) {
+  return shouldRedact
     || /\b(read|tell me|what.*say|what is|what's|content|contents|code\s*word|codeword)\b/i.test(directive);
 }
 
-function buildFileReadResponse(directive: string, path: string, content: string, openedInspector: boolean) {
+function wantsMultipleFileRead(directive: string) {
+  const text = directive.toLowerCase();
+  return /\b(both|all|each|files|and also|also|then|test.*info|info.*test)\b/.test(text)
+    || (/\band\b/.test(text) && /\b(file|files|txt|text)\b/.test(text));
+}
+
+function isFileReadDirective(directive: string) {
+  return /\b(read|what.*in|what.*says?|tell me|content|contents|files?)\b/i.test(directive);
+}
+
+function flattenFileTree(nodes: unknown): FileTreeNode[] {
+  if (!Array.isArray(nodes)) return [];
+
+  const flattened: FileTreeNode[] = [];
+  const visit = (node: FileTreeNode) => {
+    flattened.push(node);
+    if (Array.isArray(node.children)) {
+      node.children.forEach(visit);
+    }
+  };
+
+  nodes.forEach((node) => {
+    if (node && typeof node === "object") visit(node as FileTreeNode);
+  });
+
+  return flattened;
+}
+
+function isFolderNode(node: FileTreeNode) {
+  return node.type === "folder" || node.type === "directory";
+}
+
+function isFileNode(node: FileTreeNode) {
+  return node.type === "file";
+}
+
+function fileNameMatchesDirective(name: string, directive: string) {
+  const normalizedName = name.toLowerCase();
+  const normalizedDirective = directive.toLowerCase();
+  const stem = normalizedName.replace(/\.[^.]+$/, "");
+
+  return normalizedDirective.includes(normalizedName)
+    || normalizedDirective.includes(stem)
+    || (stem === "info" && /\binfo\b/.test(normalizedDirective))
+    || (stem === "test" && /\btest\b/.test(normalizedDirective));
+}
+
+function getFilesUnderFolder(folder: FileTreeNode) {
+  const children = Array.isArray(folder.children) ? folder.children : [];
+  return children
+    .filter((child) => isFileNode(child) && typeof child.path === "string")
+    .map((child) => normalizePathSeparators(child.path!));
+}
+
+function inferReadPathsFromContext(directive: string, history: ChatMessage[], fileTree: unknown) {
+  if (!isFileReadDirective(directive)) return [];
+
+  const nodes = flattenFileTree(fileTree);
+  const fileNodes = nodes.filter((node) => isFileNode(node) && typeof node.path === "string");
+  const recentText = history
+    .slice(-8)
+    .map((message) => message.content)
+    .join("\n");
+  const combinedText = `${directive}\n${recentText}`;
+  const inferred = new Set<string>();
+
+  for (const file of fileNodes) {
+    if (typeof file.name === "string" && fileNameMatchesDirective(file.name, directive)) {
+      inferred.add(normalizePathSeparators(file.path!));
+    }
+  }
+
+  const mentionsNotes = /\bnotes?\b/i.test(combinedText);
+  const asksForFolderFiles = wantsMultipleFileRead(directive) || /\bfiles?\b/i.test(directive);
+  if (mentionsNotes && asksForFolderFiles) {
+    const notesFolder = nodes.find((node) => isFolderNode(node) && String(node.name || "").toLowerCase() === "notes");
+    if (notesFolder) {
+      getFilesUnderFolder(notesFolder).forEach((path) => inferred.add(path));
+    }
+    for (const file of fileNodes) {
+      const path = normalizePathSeparators(file.path!);
+      if (/(^|\/)notes\//i.test(path)) inferred.add(path);
+    }
+    if (inferred.size === 0 && fileNodes.length > 0 && fileNodes.length <= 5) {
+      fileNodes
+        .filter((file) => /\.txt$/i.test(String(file.name || file.path || "")))
+        .forEach((file) => inferred.add(normalizePathSeparators(file.path!)));
+    }
+  }
+
+  const explicitTxtNames = Array.from(directive.matchAll(/\b[\w.-]+\.txt\b/gi)).map((match) => match[0].toLowerCase());
+  if (explicitTxtNames.length > 0) {
+    for (const file of fileNodes) {
+      const fileName = String(file.name || "").toLowerCase();
+      if (explicitTxtNames.includes(fileName)) inferred.add(normalizePathSeparators(file.path!));
+    }
+  }
+
+  return Array.from(inferred).slice(0, 5);
+}
+
+function getReadFilePaths(payload: Record<string, any>) {
+  const candidates = [
+    payload.path,
+    payload.file_path,
+    payload.filePath,
+    ...(Array.isArray(payload.paths) ? payload.paths : []),
+    ...(Array.isArray(payload.files) ? payload.files : []),
+  ];
+
+  const seen = new Set<string>();
+  return candidates
+    .filter((value) => typeof value === "string" && value.trim())
+    .map((value) => normalizePathSeparators(value.trim()))
+    .filter((value) => {
+      if (seen.has(value)) return false;
+      seen.add(value);
+      return true;
+    });
+}
+
+function buildFileReadResponse(directive: string, path: string, content: string, openedInspector: boolean, shouldRedact = false) {
   const fileName = getFileName(path);
   const displayPath = normalizePathSeparators(path);
   const cleaned = stripFileContentWrapper(content);
-  const shouldRedact = wantsRedaction(directive);
 
   if (openedInspector && !shouldRedact) {
     return `Opened ${fileName} in Remote_Inspector.\nPath: ${displayPath}`;
@@ -193,6 +338,10 @@ function buildFileReadResponse(directive: string, path: string, content: string,
   }
 
   return `I read ${fileName}. It says:\n\n${cleaned || "(empty file)"}`;
+}
+
+function isEmptyBridgeResponse(message: string) {
+  return /Bridge Offline:\s*Empty response from Neural Bridge/i.test(message);
 }
 
 export function NeuralCommand() {
@@ -221,7 +370,9 @@ export function NeuralCommand() {
     historySeed: ChatMessage[],
     isSilent: boolean = false,
     rootDirective: string = input,
-    readFileOverride: ReadFileSnapshot | null = null
+    readFileOverride: ReadFileSnapshot | null = null,
+    readDepth: number = 0,
+    redactionOverride?: boolean
   ) => {
     let localHistory = [...historySeed];
     
@@ -233,6 +384,7 @@ export function NeuralCommand() {
 
     setIsLoading(true);
     if (!isSilent) addManualLog("NEURAL", `Analyzing directive: "${input}"`);
+    const shouldRedactTurn = redactionOverride ?? shouldRedactForTurn(rootDirective, localHistory);
 
     try {
       const conversationHistory = localHistory.slice(-15).map(m => ({
@@ -241,7 +393,7 @@ export function NeuralCommand() {
       }));
       const contextReadFile = readFileOverride || lastAgentReadFile || fileContent || undefined;
 
-      const result = await nexusCommand({
+      let result = await nexusCommand({
         prompt: input,
         history: conversationHistory,
         context: {
@@ -253,10 +405,22 @@ export function NeuralCommand() {
           lastReadFile: contextReadFile ? { path: contextReadFile.path, content: contextReadFile.content } : undefined
         }
       });
+      const inferredReadPaths = inferReadPathsFromContext(rootDirective, localHistory, fileTree);
+
+      if (isEmptyBridgeResponse(result.message) && inferredReadPaths.length > 0) {
+        result = {
+          thought: "Local fallback recovered file-read intent from visible file tree context.",
+          command: "READ_FILE",
+          payload: inferredReadPaths.length > 1 ? { paths: inferredReadPaths } : { path: inferredReadPaths[0] },
+          message: inferredReadPaths.length > 1
+            ? `Reading ${inferredReadPaths.length} files from local context.`
+            : `Reading ${getFileName(inferredReadPaths[0])} from local context.`,
+        };
+      }
 
       const modelMsg: ChatMessage = {
         role: 'model',
-        content: humanizeModelMessage(result.message, rootDirective),
+        content: humanizeModelMessage(result.message, shouldRedactTurn),
         command: result.command !== "NONE" ? result.command : undefined,
         timestamp: Date.now()
       };
@@ -265,51 +429,73 @@ export function NeuralCommand() {
       setMessages([...localHistory]);
 
       if (result.thought) addManualLog("NEURAL", result.thought);
-      if (isSilent && result.command !== "NONE") {
+      const allowSilentFollowupRead = result.command === "READ_FILE"
+        && wantsMultipleFileRead(rootDirective)
+        && readDepth < 4;
+      if (isSilent && result.command !== "NONE" && !allowSilentFollowupRead) {
         addManualLog("SECURITY", `Suppressed ${result.command} from file-derived AI context`);
         return;
       }
 
       // --- SYNCHRONOUS HANDSHAKE LOOP ---
-      if (result.command === "READ_FILE" && result.payload?.path) {
-        const readPath = String(result.payload.path);
-        const openInspector = wantsInspectorOpen(rootDirective, result.payload);
-        addManualLog("COMMAND", `Executing READ_FILE: ${readPath}`);
+      if (result.command === "READ_FILE") {
+        const readPathSet = new Set(getReadFilePaths(result.payload || {}));
+        if (wantsMultipleFileRead(rootDirective)) {
+          inferredReadPaths.forEach((path) => readPathSet.add(path));
+        }
+        const readPaths = Array.from(readPathSet);
+        if (readPaths.length === 0) return;
+
+        const openInspector = readPaths.length === 1 && wantsInspectorOpen(rootDirective, result.payload, shouldRedactTurn);
+        const readSnapshots: ReadFileSnapshot[] = [];
         try {
-          const content = await nexus.readFile(readPath, { openInspector });
-          if (content !== null) {
+          for (const readPath of readPaths.slice(0, 5)) {
+            addManualLog("COMMAND", `Executing READ_FILE: ${readPath}`);
+            const content = await nexus.readFile(readPath, { openInspector });
+            if (content === null) continue;
+
             const readSnapshot = { path: readPath, content };
+            readSnapshots.push(readSnapshot);
             setLastAgentReadFile(readSnapshot);
             const readResponse: ChatMessage = {
               role: 'model',
-              content: buildFileReadResponse(rootDirective, readPath, content, openInspector),
+              content: buildFileReadResponse(rootDirective, readPath, content, openInspector, shouldRedactTurn),
               timestamp: Date.now()
             };
             localHistory = [...localHistory, readResponse];
             setMessages([...localHistory]);
+          }
 
-            if (openInspector || shouldAnswerDirectlyFromRead(rootDirective)) {
-              return;
-            }
+          const lastReadSnapshot = readSnapshots[readSnapshots.length - 1];
+          if (!lastReadSnapshot) return;
 
-            // RECURSIVE TURN: Content injected immediately into localHistory accumulator
-            await processAiTurn(
-              `SYSTEM_FEEDBACK: File retrieved from ${readPath}.
+          const shouldContinueForMoreFiles = wantsMultipleFileRead(rootDirective)
+            && readPaths.length === 1
+            && readDepth < 4;
+          if (openInspector || (shouldAnswerDirectlyFromRead(rootDirective, shouldRedactTurn) && !shouldContinueForMoreFiles)) {
+            return;
+          }
+
+          const feedbackContent = readSnapshots
+            .map((snapshot) => `FILE: ${snapshot.path}\nCONTENT:\n"""\n${snapshot.content}\n"""`)
+            .join("\n\n");
+
+          // RECURSIVE TURN: Content injected immediately into localHistory accumulator
+          await processAiTurn(
+            `SYSTEM_FEEDBACK: File retrieval completed.
 ORIGINAL_DIRECTIVE:
 """
 ${rootDirective}
 """
-CONTENT:
-"""
-${content}
-"""
-Answer the original directive using this file content. Do not open the file inspector. Do not request another file read unless a different file is required.`,
-              localHistory,
-              true,
-              rootDirective,
-              readSnapshot
-            );
-          }
+${feedbackContent}
+Answer the original directive using the retrieved file content. If the original directive asks for another file that has not been retrieved yet, request READ_FILE for that file. Do not open the file inspector unless the original directive explicitly asked to open it.`,
+            localHistory,
+            true,
+            rootDirective,
+            lastReadSnapshot,
+            readDepth + 1,
+            shouldRedactTurn
+          );
         } catch (readError: any) {
           addManualLog("ERROR", `READ_FILE FAILED: ${readError.message}`);
           await processAiTurn(
@@ -322,7 +508,9 @@ Tell the user the file could not be read and include the failure reason.`,
             localHistory,
             true,
             rootDirective,
-            readFileOverride
+            readFileOverride,
+            readDepth + 1,
+            shouldRedactTurn
           );
         }
       } else if (result.command !== "NONE") {

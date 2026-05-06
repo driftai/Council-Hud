@@ -14,9 +14,11 @@ export const DEFAULT_NEXUS_SYSTEM_INSTRUCTION = `[SYSTEM_MANDATE]: YOU ARE A RAW
 9. If a referenced folder contains one matching text file, use that exact path instead of demanding that the user provide a full path.
 10. If the user asks to open/show/view a file here, use command READ_FILE and include payload.openInspector=true.
 11. If the user asks to blur, redact, hide, mask, or remove important/sensitive information, redact secrets, API keys, tokens, resume/session ids, private paths, and credentials before showing content.
+12. If the user asks for multiple files, read every requested file before giving the final answer. Prefer {"path": "..."} for one file or {"paths": ["...", "..."]} for multiple files.
+13. For redaction requests, do not include raw sensitive content in the visible message before or after READ_FILE. Use neutral status text until redacted content is ready.
 
 [OUTPUT_RULES]:
-- Response format: {"thought": "...", "command": "READ_FILE|NONE|...", "payload": {"path": "..."}, "message": "..."}`;
+- Response format: {"thought": "...", "command": "READ_FILE|NONE|...", "payload": {"path": "..."} or {"paths": ["...", "..."]}, "message": "..."}`;
 
 export function buildNexusSystemPrompt({
   instruction,
