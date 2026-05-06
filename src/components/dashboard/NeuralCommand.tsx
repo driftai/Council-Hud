@@ -80,6 +80,10 @@ export function NeuralCommand() {
       setMessages([...localHistory]);
 
       if (result.thought) addManualLog("NEURAL", result.thought);
+      if (isSilent && result.command !== "NONE") {
+        addManualLog("SECURITY", `Suppressed ${result.command} from file-derived AI context`);
+        return;
+      }
 
       // --- SYNCHRONOUS HANDSHAKE LOOP ---
       if (result.command === "READ_FILE" && result.payload?.path) {

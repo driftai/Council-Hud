@@ -12,7 +12,7 @@ import { Button } from "@/components/ui/button";
 interface FileNode {
   name: string;
   path: string;
-  type: 'folder' | 'file';
+  type: 'folder' | 'directory' | 'file';
   size?: number;
   modified?: string;
   children?: FileNode[];

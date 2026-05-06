@@ -42,6 +42,19 @@ interface NexusContextType {
 const NexusContext = createContext<NexusContextType | undefined>(undefined);
 
 const FAILURE_THRESHOLD = 10; 
+const SECURITY_STORAGE_KEY = 'nexus_security_key';
+
+function readStoredNexusKey() {
+  const sessionKey = sessionStorage.getItem(SECURITY_STORAGE_KEY);
+  if (sessionKey) return sessionKey;
+
+  const legacyKey = localStorage.getItem(SECURITY_STORAGE_KEY);
+  if (legacyKey) {
+    sessionStorage.setItem(SECURITY_STORAGE_KEY, legacyKey);
+    localStorage.removeItem(SECURITY_STORAGE_KEY);
+  }
+  return legacyKey || "";
+}
 
 export function NexusProvider({ children }: { children: React.ReactNode }) {
   const { url, updateUrl, isReady } = useUplink();
@@ -63,7 +76,7 @@ export function NexusProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     if (typeof window !== 'undefined') {
-      const savedKey = localStorage.getItem('nexus_security_key');
+      const savedKey = readStoredNexusKey();
       if (savedKey) setNexusKey(savedKey);
     }
   }, []);
@@ -77,13 +90,16 @@ export function NexusProvider({ children }: { children: React.ReactNode }) {
   }, [url, nexusKey]);
 
   const updateKey = (newKey: string) => {
-    setNexusKey(newKey);
-    localStorage.setItem('nexus_security_key', newKey);
+    const trimmedKey = newKey.trim();
+    setNexusKey(trimmedKey);
+    sessionStorage.setItem(SECURITY_STORAGE_KEY, trimmedKey);
+    localStorage.removeItem(SECURITY_STORAGE_KEY);
   };
 
   const authorize = useCallback(() => {
     if (url) {
-      window.open(url, "nexus_handshake", "width=600,height=600");
+      const opened = window.open(url, "nexus_handshake", "width=600,height=600,noopener,noreferrer");
+      if (opened) opened.opener = null;
     }
   }, [url]);
 
@@ -159,7 +175,7 @@ export function NexusProvider({ children }: { children: React.ReactNode }) {
       }
 
       if (tree.status === "fulfilled") {
-        const response = tree.value;
+        const response = tree.value as any;
         const cleanTree = Array.isArray(response)
           ? response
           : (response.payload?.tree || response.payload || response.tree || []);
@@ -221,7 +237,7 @@ export function NexusProvider({ children }: { children: React.ReactNode }) {
         const treeResult = await clientRef.current.fetchEnvelope<any>("/filesystem/tree", {
           method: 'POST',
           body: { path: payload.path }
-        });
+        }) as any;
         const cleanTree = Array.isArray(treeResult)
           ? treeResult
           : (treeResult.payload?.tree || treeResult.payload || treeResult.tree || []);

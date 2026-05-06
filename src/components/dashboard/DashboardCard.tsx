@@ -1,11 +1,12 @@
 import { cn } from "@/lib/utils";
-import { ReactNode } from "react";
+import type { CSSProperties, ReactNode } from "react";
 
 interface DashboardCardProps {
   title?: string;
   subtitle?: string;
   children: ReactNode;
   className?: string;
+  style?: CSSProperties;
   headerAction?: ReactNode;
   variant?: "cyan" | "green" | "default";
 }
@@ -15,6 +16,7 @@ export function DashboardCard({
   subtitle,
   children,
   className,
+  style,
   headerAction,
   variant = "default",
 }: DashboardCardProps) {
@@ -31,6 +33,7 @@ export function DashboardCard({
         variantStyles[variant],
         className
       )}
+      style={style}
     >
       <div className="absolute top-0 left-0 w-full h-[1px] bg-gradient-to-r from-transparent via-white/10 to-transparent" />
       <div className="absolute bottom-0 left-0 w-full h-[1px] bg-gradient-to-r from-transparent via-white/10 to-transparent" />

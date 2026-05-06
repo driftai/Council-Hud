@@ -39,7 +39,15 @@ export class NexusClient {
    */
   private getSecurityKey(): string {
     if (typeof window !== 'undefined') {
-      return localStorage.getItem('nexus_security_key') || '';
+      const sessionKey = sessionStorage.getItem('nexus_security_key') || '';
+      if (sessionKey) return sessionKey;
+
+      const legacyKey = localStorage.getItem('nexus_security_key') || '';
+      if (legacyKey) {
+        sessionStorage.setItem('nexus_security_key', legacyKey);
+        localStorage.removeItem('nexus_security_key');
+      }
+      return legacyKey;
     }
     return '';
   }

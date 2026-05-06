@@ -88,7 +88,9 @@ ${colorConfig
     const color =
       itemConfig.theme?.[theme as keyof typeof itemConfig.theme] ||
       itemConfig.color
-    return color ? `  --color-${key}: ${color};` : null
+    const safeKey = sanitizeCssIdentifier(key)
+    const safeColor = sanitizeCssColor(color)
+    return safeColor ? `  --color-${safeKey}: ${safeColor};` : null
   })
   .join("\n")}
 }
@@ -98,6 +100,18 @@ ${colorConfig
       }}
     />
   )
+}
+
+function sanitizeCssIdentifier(value: string) {
+  return value.replace(/[^a-zA-Z0-9_-]/g, "_")
+}
+
+function sanitizeCssColor(value?: string) {
+  if (!value) return null
+  const trimmed = value.trim()
+  if (/[;{}]/.test(trimmed)) return null
+  if (/^[#a-zA-Z0-9\s.,%()+/-]+$/.test(trimmed)) return trimmed
+  return null
 }
 
 const ChartTooltip = RechartsPrimitive.Tooltip

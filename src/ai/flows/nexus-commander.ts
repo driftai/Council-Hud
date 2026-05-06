@@ -121,7 +121,7 @@ USER DIRECTIVE: "${input.prompt}"`;
         message: parsed.message || "Directive acknowledged."
       });
     } catch (e: any) {
-      console.error("Parse Fault:", rawJson);
+      console.error("Parse Fault:", e.message);
       return {
         thought: `Extraction Fault: ${e.message}`,
         command: 'NONE',
