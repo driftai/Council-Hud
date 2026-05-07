@@ -45,6 +45,27 @@ type PendingDelete = {
   message: string;
 };
 
+type CodewordEdit = {
+  content: string;
+  codeword: string;
+};
+
+type LocalTextEdit = {
+  content: string;
+  description: string;
+};
+
+type SessionMemory = {
+  firstUserIntent?: string;
+  lastTargetPath?: string;
+  lastReadPath?: string;
+  lastWritePath?: string;
+  lastFilePreview?: string;
+  recentFiles: string[];
+  recentUserIntents: string[];
+  fileEvents: string[];
+};
+
 type FileTreeNode = {
   name?: string;
   path?: string;
@@ -58,6 +79,17 @@ function normalizePathSeparators(path: string) {
 
 function getFileName(path: string) {
   return normalizePathSeparators(path).split("/").filter(Boolean).pop() || path;
+}
+
+function compactPreview(content: string, maxLength = 1200) {
+  const normalized = redactSensitiveContent(normalizeFileWriteContent(content).trim());
+  return normalized.length > maxLength
+    ? `${normalized.slice(0, maxLength)}\n...[truncated]`
+    : normalized;
+}
+
+function trimList<T>(items: T[], maxLength: number) {
+  return items.slice(Math.max(0, items.length - maxLength));
 }
 
 function stripFileContentWrapper(value: string) {
@@ -102,7 +134,31 @@ function wantsRevertDirective(directive: string) {
 }
 
 function wantsSessionFirstQuestion(directive: string) {
-  return /\bwhat did i ask\b.*\bfirst\b|\bfirst\b.*\basked\b.*\bsession\b/i.test(directive);
+  const text = directive.toLowerCase();
+  return /\bwhat did i ask\b.*\bfirst\b|\bfirst\b.*\basked\b.*\bsession\b/i.test(text)
+    || /\bwhat\b[\s\S]*\b(first|earliest|initial)\b[\s\S]*\b(thing|message|prompt|question|request)\b[\s\S]*\bi\b[\s\S]*\b(asked|said|sent|typed)\b[\s\S]*\byou\b/i.test(text)
+    || /\b(first|earliest|initial)\b[\s\S]*\bi\b[\s\S]*\b(asked|said|sent|typed)\b[\s\S]*\byou\b/i.test(text)
+    || /\bwhat\b[\s\S]*\bi\b[\s\S]*\b(asked|said|sent|typed)\b[\s\S]*\b(first|earliest|initial)\b/i.test(text);
+}
+
+function wantsSessionMemoryComplaint(directive: string) {
+  return /\b(no|not)\s+mem+or(?:y|ies)\b|\bno\s+mem+emory\b|\bforgot\b.*\b(session|chat|chatlog|conversation)\b/i.test(directive);
+}
+
+function wantsCodewordHistoryQuestion(directive: string) {
+  return /\bhow\s+many\b[\s\S]*\b(words?|code\s*words?|codewords?)\b[\s\S]*\b(session|gone through|used|changed|set)\b/i.test(directive)
+    || /\b(words?|code\s*words?|codewords?)\b[\s\S]*\bgone through\b[\s\S]*\bsession\b/i.test(directive);
+}
+
+function wantsCorrectionOnly(directive: string) {
+  const text = directive.toLowerCase();
+  const soundsLikeCorrection = /\b(i only asked|only asked|did(?:n'|’)?t ask|didnt ask|that was an error|that was wrong|not what i asked)\b/.test(text);
+  const hasNewAction = /\b(read|open|change|replace|write|delete|create|make|show me|what does|what is|what's)\b/.test(text);
+  return soundsLikeCorrection && !hasNewAction;
+}
+
+function wantsStatusNudge(directive: string) {
+  return /^\s*(\?+|h+m+|hmm+|uh+|ok+\??)\s*$/i.test(directive);
 }
 
 function shouldRedactForTurn(rootDirective: string, history: ChatMessage[]) {
@@ -252,7 +308,7 @@ function shouldAnswerDirectlyFromRead(directive: string, shouldRedact = false) {
 
 function wantsMultipleFileRead(directive: string) {
   const text = directive.toLowerCase();
-  return /\b(both|all|each|files|and also|also|then|test.*info|info.*test)\b/.test(text)
+  return /\b(both|all|each|files|and also|test.*info|info.*test)\b/.test(text)
     || (/\band\b/.test(text) && /\b(file|files|txt|text)\b/.test(text));
 }
 
@@ -302,6 +358,36 @@ function getFilesUnderFolder(folder: FileTreeNode) {
   return children
     .filter((child) => isFileNode(child) && typeof child.path === "string")
     .map((child) => normalizePathSeparators(child.path!));
+}
+
+function getExplicitFileNames(directive: string) {
+  const names = new Set<string>();
+  for (const match of directive.matchAll(/\b[\w.-]+\.[A-Za-z0-9]{1,8}\b/gi)) {
+    names.add(match[0].toLowerCase());
+  }
+  if (/\btest\s+(?:text\s+)?file\b|\btest file\b/i.test(directive)) names.add("test.txt");
+  if (/\btext\.txt\b/i.test(directive)) names.add("test.txt");
+  if (/\binfo\s+(?:text\s+)?file\b|\binfo file\b/i.test(directive)) names.add("info.txt");
+  return Array.from(names);
+}
+
+function getRequestedFilePaths(directive: string, history: ChatMessage[], fileTree: unknown) {
+  const explicitNames = getExplicitFileNames(directive);
+  if (explicitNames.length === 0) return [];
+
+  const nodes = flattenFileTree(fileTree);
+  const fileNodes = nodes.filter((node) => isFileNode(node) && typeof node.path === "string");
+  const folderNames = getRelevantFolderNames(directive, history);
+  const matches = fileNodes.filter((file) => {
+    const fileName = String(file.name || getFileName(file.path!)).toLowerCase();
+    const path = normalizePathSeparators(file.path!).toLowerCase();
+    const nameMatches = explicitNames.includes(fileName) || explicitNames.some((name) => path.endsWith(`/${name}`));
+    if (!nameMatches) return false;
+    if (folderNames.length === 0) return true;
+    return folderNames.some((folderName) => pathIsUnderFolder(path, folderName));
+  });
+
+  return matches.map((file) => normalizePathSeparators(file.path!));
 }
 
 function getRequestedFolderNames(text: string) {
@@ -451,6 +537,21 @@ function constrainPathsToRequestedFolder(paths: string[], directive: string, his
   return fallback.size > 0 ? Array.from(fallback) : paths;
 }
 
+function constrainPathsToExplicitFiles(paths: string[], directive: string, history: ChatMessage[], fileTree: unknown) {
+  const explicitNames = getExplicitFileNames(directive);
+  if (explicitNames.length === 0) return paths;
+
+  const matchingPayloadPaths = paths.filter((pathValue) => {
+    const fileName = getFileName(pathValue).toLowerCase();
+    const lowerPath = normalizePathSeparators(pathValue).toLowerCase();
+    return explicitNames.includes(fileName) || explicitNames.some((name) => lowerPath.endsWith(`/${name}`));
+  });
+  if (matchingPayloadPaths.length > 0) return matchingPayloadPaths;
+
+  const requestedPaths = getRequestedFilePaths(directive, history, fileTree);
+  return requestedPaths.length > 0 ? requestedPaths : paths;
+}
+
 function inferReadPathsFromContext(directive: string, history: ChatMessage[], fileTree: unknown) {
   if (!isFileReadDirective(directive)) return [];
 
@@ -470,7 +571,9 @@ function inferReadPathsFromContext(directive: string, history: ChatMessage[], fi
   }
 
   const mentionsNotes = /\bnotes?\b/i.test(combinedText);
-  const asksForFolderFiles = wantsMultipleFileRead(directive) || /\bfiles?\b/i.test(directive);
+  const asksForFolderFiles = wantsMultipleFileRead(directive)
+    || /\b(all|both|each)\b.*\bfiles\b/i.test(directive)
+    || /\bfiles\b.*\b(folder|there|ther|inside)\b/i.test(directive);
   if (mentionsNotes && asksForFolderFiles) {
     const notesFolder = nodes.find((node) => isFolderNode(node) && String(node.name || "").toLowerCase() === "notes");
     if (notesFolder) {
@@ -528,7 +631,7 @@ function getWriteFilePath(payload: Record<string, any>, fallbackPath = "") {
 
 function getWriteFileContent(payload: Record<string, any>) {
   for (const value of [payload.content, payload.file_content, payload.fileContent, payload.text, payload.body]) {
-    if (typeof value === "string") return value;
+    if (typeof value === "string") return normalizeFileWriteContent(value);
   }
   return "";
 }
@@ -548,7 +651,7 @@ function getFirstUserQuestion(history: ChatMessage[]) {
 
 function buildSessionFirstQuestionResponse(firstQuestion: string) {
   if (!firstQuestion) return "I do not have an earlier user request in this page session.";
-  return `The first thing you asked in this page session was:\n\n${firstQuestion}`;
+  return `The first thing you asked in this page session was:\n\n"${redactSensitiveContent(firstQuestion)}"`;
 }
 
 function buildFileWriteResponse(path: string, content: string, hadSnapshot: boolean) {
@@ -564,6 +667,10 @@ function buildFileDeleteResponse(path: string) {
 
 function buildDeleteConfirmationMessage(path: string) {
   return `Deletion requires confirmation.\n\nTarget: ${normalizePathSeparators(path)}\n\nApprove this dialog to delete it, or cancel to leave the file untouched.`;
+}
+
+function normalizeFileWriteContent(content: string) {
+  return content.replace(/\\r\\n/g, "\r\n").replace(/\\n/g, "\n").replace(/\\t/g, "\t");
 }
 
 function cleanReplacementTerm(value: string) {
@@ -598,20 +705,42 @@ function tryBuildSimpleReplacementContent(directive: string, content: string) {
 
 function parseCodewordAssignment(directive: string) {
   const patterns = [
-    /\bcode\s*word\b.*?\b(?:to be|to|as|=)\s+["'`]?(.+?)["'`]?(?=\s+(?:in|inside|from|on)\b|$|[.?!])/i,
-    /\bcodeword\b.*?\b(?:to be|to|as|=)\s+["'`]?(.+?)["'`]?(?=\s+(?:in|inside|from|on)\b|$|[.?!])/i,
+    /\b(?:make|set|edit|change|update)\s+(?:the\s+)?code\s*word\s+(?:to\s+be\s+|to\s+|as\s+|=\s*)?(.+?)(?=$|[.?!,]|\s+(?:then|after that|and then|and\s+read|read|open|show|here|dont|don't)\b)/i,
+    /\b(?:make|set|edit|change|update)\s+(?:the\s+)?codeword\s+(?:to\s+be\s+|to\s+|as\s+|=\s*)?(.+?)(?=$|[.?!,]|\s+(?:then|after that|and then|and\s+read|read|open|show|here|dont|don't)\b)/i,
+    /\bcode\s*word\b.*?\b(?:to be|to|as|=)\s+(.+?)(?=$|[.?!,]|\s+(?:then|after that|and then|and\s+read|read|open|show|here|dont|don't)\b)/i,
+    /\bcodeword\b.*?\b(?:to be|to|as|=)\s+(.+?)(?=$|[.?!,]|\s+(?:then|after that|and then|and\s+read|read|open|show|here|dont|don't)\b)/i,
   ];
 
   for (const pattern of patterns) {
     const match = directive.match(pattern);
-    const value = cleanReplacementTerm(match?.[1] || "");
+    const value = cleanCodewordValue(match?.[1] || "");
     if (value && !/^code\s*word\s*:?\s*$/i.test(value)) return value;
   }
 
   return null;
 }
 
-function tryBuildCodewordReplacementContent(directive: string, content: string) {
+function cleanCodewordValue(value: string) {
+  let cleaned = cleanReplacementTerm(value);
+  const noOtherWordMatch = cleaned.match(/\bnot\s+any\s+other\s+word\s+but\s+([A-Za-z0-9_-]+)/i);
+  if (noOtherWordMatch) return noOtherWordMatch[1];
+
+  const justAloneMatch = cleaned.match(/\bjust\s+([A-Za-z0-9_-]+)\s+alone\b/i);
+  if (justAloneMatch) return justAloneMatch[1];
+
+  cleaned = cleaned
+    .replace(/^(?:now\s+)?be\s+/i, "")
+    .replace(/^now\s+/i, "")
+    .replace(/^just\s+/i, "")
+    .replace(/^only\s+/i, "")
+    .replace(/\s+alone$/i, "")
+    .trim();
+
+  const singleToken = cleaned.match(/^[A-Za-z0-9_-]+/);
+  return singleToken?.[0] || cleaned;
+}
+
+function tryBuildCodewordReplacementContent(directive: string, content: string): CodewordEdit | null {
   const newCodeword = parseCodewordAssignment(directive);
   if (!newCodeword) return null;
 
@@ -635,10 +764,134 @@ function tryBuildCodewordReplacementContent(directive: string, content: string) 
   return { content: `Codeword: ${newCodeword}`, codeword: newCodeword };
 }
 
+function wantsReadAfterMutation(directive: string) {
+  return /\b(?:then|after that|afterwards|and then)\b[\s\S]*\b(read|show|tell me|what.*say|what.*says|content|contents)\b/i.test(directive)
+    || /\b(read|show)\b[\s\S]*\b(after|afterwards|then)\b/i.test(directive);
+}
+
+function wantsFirstLineOnlyEdit(directive: string) {
+  const text = directive.toLowerCase();
+  return (
+    /\b(remove|delete|clear|trim)\b[\s\S]*\b(everything|all|rest)\b[\s\S]*\b(apart from|except|besides|but|other than)\b[\s\S]*\b(first line|line 1|top line|code\s*word|codeword)\b/.test(text)
+    || /\b(keep|leave)\b[\s\S]*\b(only|just)\b[\s\S]*\b(first line|line 1|top line|code\s*word|codeword)\b/.test(text)
+    || /\b(remove|delete|clear|trim)\b[\s\S]*\b(after|below|under)\b[\s\S]*\b(first line|line 1|top line)\b/.test(text)
+  );
+}
+
+function wantsAiAssistedFileEdit(directive: string) {
+  const text = directive.toLowerCase();
+  if (!wantsEditDirective(directive)) return false;
+  if (wantsFirstLineOnlyEdit(directive)) return false;
+
+  const asksForGeneratedContent = /\b(add|append|insert|include|put|write|generate)\b/.test(text)
+    && /\b(names?|examples?|shows?|movies?|lines?|below|above|after|before|list|some|few)\b/.test(text);
+  const rewritesWholeFile = /\b(change|replace|rewrite|make|turn)\b/.test(text)
+    && /\b(whole file|entire file|file to be|bunch of|set of|list of|math|equations?|emojis?)\b/.test(text);
+  const compoundEdit = /\band\b[\s\S]*\b(add|append|insert|include|put|write|generate|remove|delete|clear|trim)\b/.test(text);
+  const positionalEdit = /\b(lines?|below|above|after|before)\b/.test(text);
+  const qualitativeRewrite = /\b(more complex|harder|less simple|advanced|simpler|cleaner|better)\b/.test(text);
+
+  return asksForGeneratedContent || rewritesWholeFile || compoundEdit || positionalEdit || qualitativeRewrite;
+}
+
+function isRateLimitedBridgeMessage(message: string) {
+  return /Bridge Offline:.*(?:429|rate limit)/i.test(message);
+}
+
+function isRecoverableBridgeMessage(message: string) {
+  return isRateLimitedBridgeMessage(message)
+    || /Bridge Offline|Invalid JSON|Empty response|non-JSON|No parseable JSON/i.test(message);
+}
+
+function getRequestedMinimumCount(directive: string, fallback = 10) {
+  const digitMatch = directive.match(/\b(?:at least|minimum of|around|about)?\s*(\d{1,2})\b/i);
+  if (digitMatch) return Math.max(1, Math.min(30, Number(digitMatch[1])));
+  return fallback;
+}
+
+function buildComplexMathEquations(count = 10) {
+  const equations = [
+    "2x + 7 = 19 -> x = 6",
+    "3a^2 - 12 = 63 -> a = 5 or a = -5",
+    "sqrt(144) + 5^2 = 37",
+    "(8! / 6!) + 11 = 67",
+    "log10(1000) + 4^3 = 67",
+    "sin(30 deg) + cos(60 deg) = 1",
+    "15% of 240 + 7^2 = 85",
+    "(3x - 4)(x + 2) = 0 -> x = 4/3 or x = -2",
+    "d/dx (4x^3 - 2x^2 + 9) = 12x^2 - 4x",
+    "integral 6x dx from 0 to 3 = 27",
+    "2^(n + 1) = 64 -> n = 5",
+    "(5 + 3i)(2 - i) = 13 + i",
+    "det([[2, 3], [4, 7]]) = 2",
+    "sum k=1..5 of k^2 = 55",
+    "x^2 - 10x + 25 = 0 -> x = 5",
+  ];
+  return equations.slice(0, Math.max(1, Math.min(count, equations.length))).join("\n");
+}
+
+function buildLocalAiEditFallback(directive: string, currentContent: string) {
+  const text = directive.toLowerCase();
+  const count = getRequestedMinimumCount(directive, 10);
+
+  if (/\b(math|equations?|algebra|calculus)\b/.test(text)) {
+    return {
+      content: buildComplexMathEquations(count),
+      description: "Applied local fallback math-equation generation because the AI bridge was rate-limited.",
+    };
+  }
+
+  if (/\bmore complex|harder|less simple|advanced\b/.test(text) && /[=+\-*/^√]|sqrt|log|sin|cos|integral/i.test(currentContent)) {
+    return {
+      content: buildComplexMathEquations(Math.max(count, 10)),
+      description: "Replaced the current simple equations with a more complex local fallback set because the AI bridge was rate-limited.",
+    };
+  }
+
+  if (/\bemojis?\b/.test(text)) {
+    return {
+      content: "✨ 🌌 🔥 🎮 ⚡ 🧠 💾 🚀 🎭 🌙",
+      description: "Applied local fallback emoji generation because the AI bridge was rate-limited.",
+    };
+  }
+
+  return null;
+}
+
+function buildFirstLineOnlyEdit(directive: string, content: string): LocalTextEdit | null {
+  if (!wantsFirstLineOnlyEdit(directive)) return null;
+
+  const normalized = normalizeFileWriteContent(stripFileContentWrapper(content));
+  const lines = normalized.split(/\r?\n/);
+  const wantsCodewordLine = /\bcode\s*word\b|\bcodeword\b/i.test(directive);
+  const codewordLine = wantsCodewordLine
+    ? lines.find((line) => /^\s*code\s*word\s*[:=-]/i.test(line))
+    : undefined;
+  const keptLine = codewordLine ?? lines[0] ?? "";
+
+  return {
+    content: keptLine,
+    description: `Kept only the ${codewordLine ? "codeword line" : "first line"} and removed the remaining content.`,
+  };
+}
+
+function buildNeutralReadCommandMessage(payload: Record<string, any>) {
+  const paths = getReadFilePaths(payload);
+  if (paths.length === 0) return "Reading requested file.";
+  if (paths.length === 1) return `Reading ${getFileName(paths[0])}.`;
+  return `Reading ${paths.length} requested files.`;
+}
+
+function getLabeledCodeword(content: string) {
+  const cleaned = normalizeFileWriteContent(stripFileContentWrapper(content));
+  const labeled = cleaned.match(/^\s*code\s*word\s*[:=-]\s*(.+?)\s*$/im);
+  return labeled ? stripFileContentWrapper(labeled[1]).replace(/^["']|["']$/g, "") : "";
+}
+
 function buildFileReadResponse(directive: string, path: string, content: string, openedInspector: boolean, shouldRedact = false) {
   const fileName = getFileName(path);
   const displayPath = normalizePathSeparators(path);
-  const cleaned = stripFileContentWrapper(content);
+  const cleaned = normalizeFileWriteContent(stripFileContentWrapper(content));
 
   if (openedInspector && !shouldRedact) {
     return `Opened ${fileName} in Remote_Inspector.\nPath: ${displayPath}`;
@@ -671,6 +924,12 @@ export function NeuralCommand() {
   const scrollRef = useRef<HTMLDivElement>(null);
   const fileEditCacheRef = useRef<Map<string, FileEditSnapshot>>(new Map());
   const lastMutationPathRef = useRef<string | null>(null);
+  const codewordHistoryRef = useRef<string[]>([]);
+  const sessionMemoryRef = useRef<SessionMemory>({
+    recentFiles: [],
+    recentUserIntents: [],
+    fileEvents: [],
+  });
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -694,6 +953,67 @@ export function NeuralCommand() {
     ];
     setMessages([...nextHistory]);
     return nextHistory;
+  };
+
+  const trackCodewordValue = (value: string) => {
+    const cleaned = cleanCodewordValue(value);
+    if (!cleaned) return;
+    const previous = codewordHistoryRef.current[codewordHistoryRef.current.length - 1];
+    if (previous !== cleaned) {
+      codewordHistoryRef.current = [...codewordHistoryRef.current, cleaned];
+    }
+  };
+
+  const rememberUserIntent = (intent: string) => {
+    const trimmed = intent.trim();
+    if (!trimmed) return;
+    sessionMemoryRef.current = {
+      ...sessionMemoryRef.current,
+      firstUserIntent: sessionMemoryRef.current.firstUserIntent || trimmed,
+      recentUserIntents: trimList([...sessionMemoryRef.current.recentUserIntents, trimmed], 12),
+    };
+  };
+
+  const rememberFileEvent = (event: string, path: string, content?: string) => {
+    const normalizedPath = normalizePathSeparators(path);
+    sessionMemoryRef.current = {
+      ...sessionMemoryRef.current,
+      lastTargetPath: normalizedPath,
+      lastFilePreview: content !== undefined ? compactPreview(content) : sessionMemoryRef.current.lastFilePreview,
+      recentFiles: trimList(Array.from(new Set([...sessionMemoryRef.current.recentFiles, normalizedPath])), 8),
+      fileEvents: trimList([...sessionMemoryRef.current.fileEvents, `${event}: ${getFileName(normalizedPath)}`], 16),
+      ...(event === "READ" ? { lastReadPath: normalizedPath } : {}),
+      ...(event === "WRITE" ? { lastWritePath: normalizedPath } : {}),
+    };
+  };
+
+  const buildSessionMemoryText = () => {
+    const memory = sessionMemoryRef.current;
+    return [
+      "SESSION_MEMORY:",
+      `First user intent: ${memory.firstUserIntent ? redactSensitiveContent(memory.firstUserIntent) : "None"}`,
+      `Last target file: ${memory.lastTargetPath || "None"}`,
+      `Last read file: ${memory.lastReadPath || "None"}`,
+      `Last written file: ${memory.lastWritePath || "None"}`,
+      `Recent files: ${memory.recentFiles.length > 0 ? memory.recentFiles.join(" | ") : "None"}`,
+      `Recent user intents: ${memory.recentUserIntents.length > 0 ? memory.recentUserIntents.join(" | ") : "None"}`,
+      `File events: ${memory.fileEvents.length > 0 ? memory.fileEvents.join(" | ") : "None"}`,
+      `Last file preview:\n"""${memory.lastFilePreview || "None"}"""`,
+    ].join("\n");
+  };
+
+  const getAiHistory = (history: ChatMessage[], limit = 24) => [
+    { role: "model" as const, content: buildSessionMemoryText() },
+    ...history.slice(-limit).map((message) => ({
+      role: message.role,
+      content: message.content,
+    })),
+  ];
+
+  const buildCodewordHistoryResponse = () => {
+    const values = codewordHistoryRef.current;
+    if (values.length === 0) return "I have not tracked any codeword values in this page session yet.";
+    return `We have gone through ${values.length} codeword ${values.length === 1 ? "value" : "values"} this page session:\n\n${values.map((value, index) => `${index + 1}. ${value}`).join("\n")}`;
   };
 
   const resolveCommandPath = (
@@ -733,10 +1053,12 @@ export function NeuralCommand() {
   };
 
   const executeWriteFile = async (path: string, content: string) => {
+    const normalizedContent = normalizeFileWriteContent(content);
     const snapshot = await cacheFileBeforeMutation(path);
-    await nexus.writeFile(path, content);
+    await nexus.writeFile(path, normalizedContent);
     lastMutationPathRef.current = path;
-    setLastAgentReadFile({ path, content });
+    setLastAgentReadFile({ path, content: normalizedContent });
+    rememberFileEvent("WRITE", path, normalizedContent);
     return snapshot;
   };
 
@@ -790,6 +1112,221 @@ export function NeuralCommand() {
     );
   };
 
+  const resolveCurrentFileTarget = (input: string, history: ChatMessage[]) => {
+    const explicitPath = getRequestedFilePaths(input, history, fileTree)[0];
+    const inferredPath = inferReadPathsFromContext(input, history, fileTree)[0];
+    const fallbackPath = explicitPath
+      || lastAgentReadFile?.path
+      || fileContent?.path
+      || inferredPath
+      || sessionMemoryRef.current.lastTargetPath
+      || sessionMemoryRef.current.lastWritePath
+      || sessionMemoryRef.current.lastReadPath
+      || "";
+    return fallbackPath ? resolveCommandPath(fallbackPath, input, history) : "";
+  };
+
+  const wantsLocalFileReadRequest = (input: string, history: ChatMessage[]) => {
+    if (wantsEditDirective(input) || wantsDeleteDirective(input) || wantsFolderInventory(input, history)) return false;
+    const text = input.toLowerCase();
+    const asksForFileContent = /\b(read|tell me|what.*say|what.*says|what.*in|content|contents)\b/.test(text)
+      || /\bwhat(?:'s| is)?\s+in\b/.test(text)
+      || wantsExplicitOpen(input);
+    const mentionsFile = getExplicitFileNames(input).length > 0 || /\b(it|that|file|current|now|after|updated)\b/.test(text);
+    return asksForFileContent && mentionsFile;
+  };
+
+  const handleLocalFileReadRequest = async (input: string, history: ChatMessage[]) => {
+    const targetPath = resolveCurrentFileTarget(input, history);
+    if (!targetPath) return null;
+
+    const shouldRedactRead = shouldRedactForTurn(input, history);
+    const openInspector = wantsInspectorOpen(input, {}, shouldRedactRead);
+    let nextHistory = appendModelMessage(history, `Reading ${getFileName(targetPath)}.`, "READ_FILE");
+    const content = await nexus.readFile(targetPath, { openInspector });
+    if (content === null) {
+      return appendModelMessage(nextHistory, `I could not read ${getFileName(targetPath)}.`);
+    }
+
+    const codeword = getLabeledCodeword(content);
+    if (codeword) trackCodewordValue(codeword);
+
+    setLastAgentReadFile({ path: targetPath, content });
+    rememberFileEvent("READ", targetPath, content);
+    nextHistory = appendModelMessage(
+      nextHistory,
+      buildFileReadResponse(input, targetPath, content, openInspector, shouldRedactRead),
+    );
+    return nextHistory;
+  };
+
+  const handleCodewordEditRequest = async (input: string, history: ChatMessage[]) => {
+    const targetPath = resolveCurrentFileTarget(input, history);
+    if (!targetPath) {
+      return appendModelMessage(
+        history,
+        "I need a target file before I can update the codeword.",
+      );
+    }
+
+    const currentContent = await nexus.readFile(targetPath, { openInspector: false });
+    if (currentContent === null) {
+      return appendModelMessage(history, `I could not read ${getFileName(targetPath)} before editing it.`);
+    }
+
+    const codewordEdit = tryBuildCodewordReplacementContent(input, currentContent);
+    if (!codewordEdit) {
+      return appendModelMessage(history, "I could not identify the new codeword value, so I left the file unchanged.");
+    }
+
+    const snapshot = await executeWriteFile(targetPath, codewordEdit.content);
+    trackCodewordValue(codewordEdit.codeword);
+    let nextHistory = appendModelMessage(
+      history,
+      `Updated the codeword to "${codewordEdit.codeword}" in ${getFileName(targetPath)}.\n${buildFileWriteResponse(targetPath, codewordEdit.content, snapshot.existed)}`,
+      "WRITE_FILE",
+    );
+
+    if (wantsReadAfterMutation(input)) {
+      const codeword = getLabeledCodeword(codewordEdit.content);
+      if (codeword) trackCodewordValue(codeword);
+      nextHistory = appendModelMessage(
+        nextHistory,
+        buildFileReadResponse("read the file", targetPath, codewordEdit.content, false, shouldRedactForTurn(input, history)),
+      );
+    }
+
+    return nextHistory;
+  };
+
+  const handleLocalTextEditRequest = async (input: string, history: ChatMessage[]) => {
+    const targetPath = resolveCurrentFileTarget(input, history);
+    if (!targetPath) {
+      return appendModelMessage(
+        history,
+        "I need a target file before I can edit its text.",
+      );
+    }
+
+    const currentContent = await nexus.readFile(targetPath, { openInspector: false });
+    if (currentContent === null) {
+      return appendModelMessage(history, `I could not read ${getFileName(targetPath)} before editing it.`);
+    }
+
+    const edit = buildFirstLineOnlyEdit(input, currentContent);
+    if (!edit) return null;
+
+    const snapshot = await executeWriteFile(targetPath, edit.content);
+    const codeword = getLabeledCodeword(edit.content);
+    if (codeword) trackCodewordValue(codeword);
+
+    let nextHistory = appendModelMessage(
+      history,
+      `${edit.description}\n${buildFileWriteResponse(targetPath, edit.content, snapshot.existed)}`,
+      "WRITE_FILE",
+    );
+
+    if (wantsReadAfterMutation(input)) {
+      nextHistory = appendModelMessage(
+        nextHistory,
+        buildFileReadResponse("read the file", targetPath, edit.content, false, shouldRedactForTurn(input, history)),
+      );
+    }
+
+    return nextHistory;
+  };
+
+  const handleAiAssistedFileEditRequest = async (input: string, history: ChatMessage[]) => {
+    const targetPath = resolveCurrentFileTarget(input, history);
+    if (!targetPath) {
+      return appendModelMessage(
+        history,
+        "I need a target file before I can apply that edit.",
+      );
+    }
+
+    const currentContent = await nexus.readFile(targetPath, { openInspector: false });
+    if (currentContent === null) {
+      return appendModelMessage(history, `I could not read ${getFileName(targetPath)} before editing it.`);
+    }
+
+    const transformPrompt = `SYSTEM_FEEDBACK: AI_ASSISTED_FILE_EDIT
+TARGET_FILE: ${targetPath}
+CURRENT_CONTENT:
+"""
+${normalizeFileWriteContent(currentContent)}
+"""
+
+USER_DIRECTIVE:
+"""
+${input}
+"""
+
+Produce the complete replacement content for TARGET_FILE. Return WRITE_FILE with payload.path exactly TARGET_FILE and payload.content containing the full new file content. Preserve any existing content the user did not ask to remove. Do not ask for another read. Do not open the inspector.`;
+
+    const result = await nexusCommand({
+      prompt: transformPrompt,
+      history: getAiHistory(history, 18),
+      context: {
+        processes: knowledgeGraph?.nodes || [],
+        fileTree: fileTree || [],
+        systemHealth: systemHealth || {},
+        currentUrl: url,
+        workingDirectory: workingDirectory || "C:/",
+        lastReadFile: { path: targetPath, content: currentContent },
+      },
+    });
+
+    const payload = result.payload || {};
+    if (result.command !== "WRITE_FILE" && isRecoverableBridgeMessage(result.message)) {
+      const fallback = buildLocalAiEditFallback(input, currentContent);
+      if (fallback) {
+        const snapshot = await executeWriteFile(targetPath, fallback.content);
+        const codeword = getLabeledCodeword(fallback.content);
+        if (codeword) trackCodewordValue(codeword);
+        let nextHistory = appendModelMessage(
+          history,
+          `${fallback.description}\n${buildFileWriteResponse(targetPath, fallback.content, snapshot.existed)}`,
+          "WRITE_FILE",
+        );
+        if (wantsReadAfterMutation(input)) {
+          nextHistory = appendModelMessage(
+            nextHistory,
+            buildFileReadResponse("read the file", targetPath, fallback.content, false, shouldRedactForTurn(input, history)),
+          );
+        }
+        return nextHistory;
+      }
+    }
+
+    if (result.command !== "WRITE_FILE" || !payloadHasWriteContent(payload)) {
+      return appendModelMessage(
+        history,
+        "I could not produce a complete replacement for that edit, so I left the file unchanged.",
+      );
+    }
+
+    const content = getWriteFileContent(payload);
+    const snapshot = await executeWriteFile(targetPath, content);
+    const codeword = getLabeledCodeword(content);
+    if (codeword) trackCodewordValue(codeword);
+
+    let nextHistory = appendModelMessage(
+      history,
+      `Applied the AI-assisted edit to ${getFileName(targetPath)}.\n${buildFileWriteResponse(targetPath, content, snapshot.existed)}`,
+      "WRITE_FILE",
+    );
+
+    if (wantsReadAfterMutation(input)) {
+      nextHistory = appendModelMessage(
+        nextHistory,
+        buildFileReadResponse("read the file", targetPath, content, false, shouldRedactForTurn(input, history)),
+      );
+    }
+
+    return nextHistory;
+  };
+
   const confirmPendingDelete = async () => {
     if (!pendingDelete) return;
     const deletePath = pendingDelete.path;
@@ -834,11 +1371,40 @@ export function NeuralCommand() {
     if (!isSilent) {
       const userMsg: ChatMessage = { role: 'user', content: input, timestamp: Date.now() };
       localHistory.push(userMsg);
+      rememberUserIntent(input);
       setMessages([...localHistory]);
     }
 
     if (!isSilent && wantsSessionFirstQuestion(input)) {
-      appendModelMessage(localHistory, buildSessionFirstQuestionResponse(getFirstUserQuestion(historySeed) || input));
+      appendModelMessage(
+        localHistory,
+        buildSessionFirstQuestionResponse(getFirstUserQuestion(historySeed) || sessionMemoryRef.current.firstUserIntent || input),
+      );
+      return;
+    }
+
+    if (!isSilent && wantsSessionMemoryComplaint(input)) {
+      appendModelMessage(
+        localHistory,
+        sessionMemoryRef.current.firstUserIntent
+          ? `I do have this page-session chatlog. The first thing you asked was:\n\n"${redactSensitiveContent(sessionMemoryRef.current.firstUserIntent)}"`
+          : "I do not have an earlier user request in this page session yet.",
+      );
+      return;
+    }
+
+    if (!isSilent && wantsCodewordHistoryQuestion(input)) {
+      appendModelMessage(localHistory, buildCodewordHistoryResponse());
+      return;
+    }
+
+    if (!isSilent && wantsStatusNudge(input)) {
+      appendModelMessage(
+        localHistory,
+        sessionMemoryRef.current.lastTargetPath
+          ? `I still have the current file context as ${getFileName(sessionMemoryRef.current.lastTargetPath)}. Last operation: ${sessionMemoryRef.current.fileEvents.at(-1) || "none"}.`
+          : "I do not have an active file operation to continue yet.",
+      );
       return;
     }
 
@@ -849,6 +1415,73 @@ export function NeuralCommand() {
         appendModelMessage(localHistory, inventoryResponse);
         return;
       }
+    }
+
+    if (!isSilent && wantsCorrectionOnly(input)) {
+      addManualLog("NEURAL", "Handled correction locally without calling Neural Bridge");
+      appendModelMessage(
+        localHistory,
+        "You're right. That should have stayed scoped to the single file you named. I will only read the explicitly requested file for requests like that.",
+      );
+      return;
+    }
+
+    if (!isSilent && wantsFirstLineOnlyEdit(input)) {
+      setIsLoading(true);
+      try {
+        const handledHistory = await handleLocalTextEditRequest(input, localHistory);
+        if (handledHistory) return;
+      } catch (error: any) {
+        const errorMsg = `Text edit failed: ${error.message || "Unknown error"}`;
+        setMessages(prev => [...prev, { role: 'model', content: errorMsg, timestamp: Date.now() }]);
+        addManualLog("ERROR", errorMsg);
+        return;
+      } finally {
+        setIsLoading(false);
+      }
+    }
+
+    if (!isSilent && wantsAiAssistedFileEdit(input)) {
+      setIsLoading(true);
+      try {
+        await handleAiAssistedFileEditRequest(input, localHistory);
+      } catch (error: any) {
+        const errorMsg = `AI file edit failed: ${error.message || "Unknown error"}`;
+        setMessages(prev => [...prev, { role: 'model', content: errorMsg, timestamp: Date.now() }]);
+        addManualLog("ERROR", errorMsg);
+      } finally {
+        setIsLoading(false);
+      }
+      return;
+    }
+
+    if (!isSilent && wantsLocalFileReadRequest(input, localHistory)) {
+      setIsLoading(true);
+      try {
+        const handledHistory = await handleLocalFileReadRequest(input, localHistory);
+        if (handledHistory) return;
+      } catch (error: any) {
+        const errorMsg = `Read failed: ${error.message || "Unknown error"}`;
+        setMessages(prev => [...prev, { role: 'model', content: errorMsg, timestamp: Date.now() }]);
+        addManualLog("ERROR", errorMsg);
+        return;
+      } finally {
+        setIsLoading(false);
+      }
+    }
+
+    if (!isSilent && parseCodewordAssignment(input) && wantsEditDirective(input)) {
+      setIsLoading(true);
+      try {
+        await handleCodewordEditRequest(input, localHistory);
+      } catch (error: any) {
+        const errorMsg = `Codeword edit failed: ${error.message || "Unknown error"}`;
+        setMessages(prev => [...prev, { role: 'model', content: errorMsg, timestamp: Date.now() }]);
+        addManualLog("ERROR", errorMsg);
+      } finally {
+        setIsLoading(false);
+      }
+      return;
     }
 
     if (!isSilent && wantsRevertDirective(input)) {
@@ -870,11 +1503,14 @@ export function NeuralCommand() {
     const shouldRedactTurn = redactionOverride ?? shouldRedactForTurn(rootDirective, localHistory);
 
     try {
-      const conversationHistory = localHistory.slice(-15).map(m => ({
-        role: m.role,
-        content: m.content
-      }));
-      const contextReadFile = readFileOverride || lastAgentReadFile || fileContent || undefined;
+      const conversationHistory = getAiHistory(localHistory, 24);
+      const contextReadFileSource = readFileOverride || lastAgentReadFile || fileContent || undefined;
+      const contextReadFile = contextReadFileSource
+        ? {
+            path: contextReadFileSource.path,
+            content: redactSensitiveContent(contextReadFileSource.content),
+          }
+        : undefined;
 
       let result = await nexusCommand({
         prompt: input,
@@ -885,7 +1521,7 @@ export function NeuralCommand() {
           systemHealth: systemHealth || {},
           currentUrl: url,
           workingDirectory: workingDirectory || "C:/",
-          lastReadFile: contextReadFile ? { path: contextReadFile.path, content: contextReadFile.content } : undefined
+          lastReadFile: contextReadFile
         }
       });
       const inferredReadPaths = inferReadPathsFromContext(rootDirective, localHistory, fileTree);
@@ -909,10 +1545,24 @@ export function NeuralCommand() {
             : `Reading ${getFileName(inferredReadPaths[0])}.`,
         };
       }
+      const explicitlyRequestedFilePaths = getRequestedFilePaths(rootDirective, localHistory, fileTree);
+      if (result.command === "READ_FILE" && explicitlyRequestedFilePaths.length > 0) {
+        const clampedPaths = explicitlyRequestedFilePaths.slice(0, 5);
+        result = {
+          ...result,
+          thought: `${result.thought || "Reading file."} Clamped READ_FILE to explicitly requested filename(s).`,
+          payload: clampedPaths.length > 1 ? { paths: clampedPaths } : { path: clampedPaths[0] },
+          message: clampedPaths.length > 1
+            ? `Reading ${clampedPaths.length} explicitly requested files.`
+            : `Reading ${getFileName(clampedPaths[0])}.`,
+        };
+      }
 
       const modelMsg: ChatMessage = {
         role: 'model',
-        content: humanizeModelMessage(result.message, shouldRedactTurn),
+        content: result.command === "READ_FILE"
+          ? buildNeutralReadCommandMessage(result.payload || {})
+          : humanizeModelMessage(result.message, shouldRedactTurn),
         command: result.command !== "NONE" ? result.command : undefined,
         timestamp: Date.now()
       };
@@ -945,7 +1595,12 @@ export function NeuralCommand() {
         if (wantsMultipleFileRead(rootDirective)) {
           inferredReadPaths.forEach((path) => readPathSet.add(path));
         }
-        const readPaths = constrainPathsToRequestedFolder(Array.from(readPathSet), rootDirective, localHistory, fileTree);
+        const readPaths = constrainPathsToExplicitFiles(
+          constrainPathsToRequestedFolder(Array.from(readPathSet), rootDirective, localHistory, fileTree),
+          rootDirective,
+          localHistory,
+          fileTree
+        );
         if (readPaths.length === 0) return;
 
         const openInspector = readPaths.length === 1 && wantsInspectorOpen(rootDirective, result.payload, shouldRedactTurn);
@@ -957,8 +1612,11 @@ export function NeuralCommand() {
             if (content === null) continue;
 
             const readSnapshot = { path: readPath, content };
+            const codeword = getLabeledCodeword(content);
+            if (codeword) trackCodewordValue(codeword);
             readSnapshots.push(readSnapshot);
             setLastAgentReadFile(readSnapshot);
+            rememberFileEvent("READ", readPath, content);
             const readResponse: ChatMessage = {
               role: 'model',
               content: buildFileReadResponse(rootDirective, readPath, content, openInspector, shouldRedactTurn),
@@ -1003,7 +1661,7 @@ export function NeuralCommand() {
           }
 
           const feedbackContent = readSnapshots
-            .map((snapshot) => `FILE: ${snapshot.path}\nCONTENT:\n"""\n${snapshot.content}\n"""`)
+            .map((snapshot) => `FILE: ${snapshot.path}\nCONTENT:\n"""\n${redactSensitiveContent(snapshot.content)}\n"""`)
             .join("\n\n");
 
           // RECURSIVE TURN: Content injected immediately into localHistory accumulator
@@ -1069,10 +1727,12 @@ Tell the user the file could not be read and include the failure reason.`,
             const codewordEdit = snapshot.content !== null
               ? tryBuildCodewordReplacementContent(rootDirective, snapshot.content)
               : null;
-            const content = codewordEdit?.content || modelContent;
+            const content = normalizeFileWriteContent(codewordEdit?.content || modelContent);
             await nexus.writeFile(writePath, content);
             lastMutationPathRef.current = writePath;
             setLastAgentReadFile({ path: writePath, content });
+            rememberFileEvent("WRITE", writePath, content);
+            if (codewordEdit) trackCodewordValue(codewordEdit.codeword);
             localHistory = appendModelMessage(
               localHistory,
               codewordEdit

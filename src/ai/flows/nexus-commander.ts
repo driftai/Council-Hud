@@ -48,6 +48,11 @@ const NexusCommandOutputSchema = z.object({
 export type NexusCommandOutput = z.infer<typeof NexusCommandOutputSchema>;
 
 const COMMANDS = ['SET_PATH', 'KILL_PROCESS', 'READ_FILE', 'WRITE_FILE', 'DELETE_FILE', 'NONE'] as const;
+const RATE_LIMIT_RETRIES = 2;
+
+function delay(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 function stripCodeFence(value: string) {
   const trimmed = value.trim();
@@ -226,56 +231,75 @@ export async function nexusCommand(input: NexusCommandInput): Promise<NexusComma
     userDirective: input.prompt,
   });
 
-  try {
-    const response = await fetch(NVIDIA_URL, {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: selectedModel,
-        messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: input.prompt }
-        ],
-        temperature: 0.0,
-        max_tokens: 4096,
-      }),
-    });
-
-    const json = await response.json();
-    const aiContent = json.choices?.[0]?.message?.content?.trim();
-
-    if (!aiContent) {
-      throw new Error(json?.error?.message || "Empty response from Neural Bridge.");
-    }
-
-    const candidates = collectJsonCandidates(aiContent);
-    if (candidates.length === 0) {
-      return { thought: "Plain text response.", command: 'NONE', payload: {}, message: aiContent };
-    }
-
+  for (let attempt = 0; attempt <= RATE_LIMIT_RETRIES; attempt++) {
     try {
-      for (const candidate of candidates) {
-        try {
-          return normalizeCommandOutput(parseLooseJson(candidate));
-        } catch {
-          continue;
-        }
+      const response = await fetch(NVIDIA_URL, {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${apiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: selectedModel,
+          messages: [
+            { role: "system", content: systemPrompt },
+            { role: "user", content: input.prompt }
+          ],
+          temperature: 0.0,
+          max_tokens: 4096,
+        }),
+      });
+
+      const responseText = await response.text();
+      let json: any;
+      try {
+        json = JSON.parse(responseText);
+      } catch {
+        throw new Error(`Neural Bridge returned non-JSON response (${response.status}).`);
+      }
+      if (!response.ok) {
+        throw new Error(json?.error?.message || `Neural Bridge HTTP ${response.status}.`);
+      }
+      const aiContent = json.choices?.[0]?.message?.content?.trim();
+
+      if (!aiContent) {
+        throw new Error(json?.error?.message || "Empty response from Neural Bridge.");
       }
 
-      throw new Error("No parseable JSON candidate found.");
-    } catch (e: any) {
-      console.error("Parse Fault:", e.message);
-      return {
-        thought: `Extraction Fault: ${e.message}`,
-        command: 'NONE',
-        payload: {},
-        message: "Neural Bridge Interrupted: Invalid JSON Structure Received."
-      };
+      const candidates = collectJsonCandidates(aiContent);
+      if (candidates.length === 0) {
+        return { thought: "Plain text response.", command: 'NONE', payload: {}, message: aiContent };
+      }
+
+      try {
+        for (const candidate of candidates) {
+          try {
+            return normalizeCommandOutput(parseLooseJson(candidate));
+          } catch {
+            continue;
+          }
+        }
+
+        throw new Error("No parseable JSON candidate found.");
+      } catch (e: any) {
+        console.error("Parse Fault:", e.message);
+        return {
+          thought: `Extraction Fault: ${e.message}`,
+          command: 'NONE',
+          payload: {},
+          message: "Neural Bridge Interrupted: Invalid JSON Structure Received."
+        };
+      }
+    } catch (error: any) {
+      const message = error.message || "Network Timeout";
+      const rateLimited = /429|rate limit/i.test(message);
+      if (rateLimited && attempt < RATE_LIMIT_RETRIES) {
+        await delay(800 * Math.pow(2, attempt));
+        continue;
+      }
+      return { thought: "Network error.", command: 'NONE', payload: {}, message: `Bridge Offline: ${message}` };
     }
-  } catch (error: any) {
-    return { thought: "Network error.", command: 'NONE', payload: {}, message: `Bridge Offline: ${error.message}` };
   }
+
+  return { thought: "Network error.", command: 'NONE', payload: {}, message: "Bridge Offline: Unknown failure" };
 }
