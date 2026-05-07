@@ -6,9 +6,15 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const VALID_KINDS = new Set(["chat", "task", "status", "presence", "ack", "heartbeat", "error"]);
+const VALID_SCOPES = new Set(["topic", "dm", "broadcast"]);
 
 function cleanName(value: unknown, fallback: string) {
   const text = typeof value === "string" ? value.trim() : "";
+  return /^[A-Za-z0-9_.-]{1,40}$/.test(text) ? text : fallback;
+}
+
+function cleanTopic(value: unknown, fallback: string) {
+  const text = typeof value === "string" ? value.trim().replace(/^#/, "") : "";
   return /^[A-Za-z0-9_.-]{1,40}$/.test(text) ? text : fallback;
 }
 
@@ -30,8 +36,9 @@ export async function POST(request: NextRequest) {
   }
 
   const from = cleanName(body?.from, "operator");
-  const to = cleanName(body?.to, "*");
-  const topic = to === "*" ? cleanName(body?.topic, "council") : "";
+  const scope = VALID_SCOPES.has(String(body?.scope || "")) ? String(body.scope) : "topic";
+  const to = scope === "dm" ? cleanName(body?.to, "agent-e-bridge") : "*";
+  const topic = scope === "topic" ? cleanTopic(body?.topic, "council") : null;
   const kind = VALID_KINDS.has(String(body?.kind || "")) ? String(body.kind) : "chat";
 
   try {

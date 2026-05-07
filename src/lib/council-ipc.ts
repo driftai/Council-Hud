@@ -25,6 +25,7 @@ export type CouncilMessage = {
   id: string;
   timestamp: string;
   sender: string;
+  to: string;
   content: string;
   topic: string;
   kind: string;
@@ -177,6 +178,7 @@ export async function readCouncilMessages(limit = 80) {
           id: "",
           timestamp: typeof parsed.timestamp === "string" ? parsed.timestamp : new Date().toISOString(),
           sender: String(parsed.sender || parsed.from || "unknown"),
+          to: String(parsed.to || "*"),
           content: String(parsed.content || parsed.message || parsed.text || ""),
           topic: String(parsed.topic || "council"),
           kind: String(parsed.kind || "chat"),
@@ -189,7 +191,6 @@ export async function readCouncilMessages(limit = 80) {
       }
     })
     .filter((message): message is CouncilMessage => Boolean(message))
-    .filter((message) => message.topic === "council")
     .sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp))
     .slice(-Math.max(1, Math.min(200, limit)));
 
@@ -210,7 +211,7 @@ export async function sendCouncilMessage({
   content: string;
   from?: string;
   to?: string;
-  topic?: string;
+  topic?: string | null;
   kind?: string;
 }) {
   const sendUrl = `${HUB_URL}/send`;
@@ -221,7 +222,7 @@ export async function sendCouncilMessage({
     content,
     kind,
   };
-  if (to === "*") payload.topic = topic || "council";
+  if (to === "*" && topic !== null) payload.topic = topic || "council";
 
   const script = `
 import json
