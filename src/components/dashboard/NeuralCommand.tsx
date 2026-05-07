@@ -206,7 +206,8 @@ function humanizeModelMessage(message: string, shouldRedact = false) {
 
 function wantsInspectorOpen(directive: string, payload: Record<string, any>, shouldRedact = false) {
   const text = directive.toLowerCase();
-  if (/\b(don't|dont|do not|without)\s+open/.test(text)) return false;
+  if (/\b(don't|dont|do not|not|without)\s+open/.test(text)) return false;
+  if (/\b(here|in chat|in the chat)\b/.test(text) && !wantsExplicitOpen(directive)) return false;
   if (shouldRedact) return false;
   const asksForContent = /\b(read|tell me|what.*say|content|contents|code\s*word|codeword)\b/.test(text);
   const explicitOpen = wantsExplicitOpen(directive);
@@ -256,7 +257,7 @@ function wantsMultipleFileRead(directive: string) {
 }
 
 function isFileReadDirective(directive: string) {
-  return /\b(read|what.*in|what.*says?|tell me|content|contents|files?)\b/i.test(directive);
+  return /\b(read|what.*in|what.*says?|tell me|content|contents)\b/i.test(directive);
 }
 
 function flattenFileTree(nodes: unknown): FileTreeNode[] {
@@ -323,13 +324,82 @@ function getFolderNode(nodes: FileTreeNode[], folderName: string) {
   return nodes.find((node) => isFolderNode(node) && String(node.name || "").toLowerCase() === folderName.toLowerCase());
 }
 
+function shouldUseHistoryFolderContext(directive: string) {
+  return /\b(it|that|those|both|all|each|them|inside it|the folder|the files|there|ther)\b/i.test(directive)
+    || !/\b[\w.-]+\.[A-Za-z0-9]{1,8}\b/.test(directive);
+}
+
+function getRelevantFolderNames(directive: string, history: ChatMessage[]) {
+  const currentFolderNames = getRequestedFolderNames(directive);
+  if (currentFolderNames.length > 0) return currentFolderNames;
+  return shouldUseHistoryFolderContext(directive)
+    ? getRequestedFolderNames(history.slice(-8).map((message) => message.content).join("\n"))
+    : [];
+}
+
+function wantsFolderInventory(directive: string, history: ChatMessage[]) {
+  const text = directive.toLowerCase();
+  if (wantsEditDirective(directive) || wantsDeleteDirective(directive) || wantsExplicitOpen(directive)) return false;
+  if (/\b(read|what.*says?|content|contents|code\s*word|codeword)\b/i.test(directive)) return false;
+
+  const folderNames = getRelevantFolderNames(directive, history);
+  const asksFolderQuestion = /\b(can you see|see|visible|exists?|is there|find|what files|which files|list|files are|inside|there|ther)\b/.test(text);
+  const correctionToListFiles = /\bshould have said\b.*\bfiles\b|\bwhat files are (?:there|ther)\b/.test(text);
+
+  return folderNames.length > 0 && (asksFolderQuestion || correctionToListFiles);
+}
+
+function buildFolderInventoryResponse(directive: string, history: ChatMessage[], fileTree: unknown) {
+  const nodes = flattenFileTree(fileTree);
+  const folderNames = getRelevantFolderNames(directive, history);
+  const requestedName = folderNames[0];
+  if (!requestedName) return null;
+
+  const folder = getFolderNode(nodes, requestedName);
+  if (!folder) {
+    return `I do not see a ${requestedName} folder in the current Recursive Mirror tree.`;
+  }
+
+  const displayName = folder.name || requestedName;
+  const wantsPath = /\b(path|where|location|located)\b/i.test(directive);
+  const pathLine = wantsPath && folder.path ? `\nPath: ${redactSensitiveContent(normalizePathSeparators(folder.path))}` : "";
+  const children = Array.isArray(folder.children) ? folder.children : [];
+  const childFiles = children
+    .filter((child) => isFileNode(child))
+    .map((child) => child.name || (child.path ? getFileName(child.path) : "unnamed file"))
+    .filter(Boolean);
+  const childFolders = children
+    .filter((child) => isFolderNode(child))
+    .map((child) => child.name || (child.path ? getFileName(child.path) : "unnamed folder"))
+    .filter(Boolean);
+  const folderPath = folder.path ? normalizePathSeparators(folder.path).replace(/\/+$/, "") : "";
+  const fallbackFiles = folderPath
+    ? nodes
+        .filter((node) => isFileNode(node) && typeof node.path === "string")
+        .filter((node) => normalizePathSeparators(node.path!).startsWith(`${folderPath}/`))
+        .map((node) => node.name || getFileName(node.path!))
+        .filter(Boolean)
+    : [];
+  const directFiles = childFiles.length > 0 ? childFiles : fallbackFiles;
+  const directFolders = childFolders;
+
+  const fileLines = directFiles.length > 0
+    ? directFiles.map((file) => `- ${file}`).join("\n")
+    : "- No direct files shown in the current tree snapshot.";
+  const folderLines = directFolders.length > 0
+    ? `\nFolders:\n${directFolders.map((folderName) => `- ${folderName}`).join("\n")}`
+    : "";
+
+  return `Yes, I can see the ${displayName} folder.${pathLine}\nFiles:\n${fileLines}${folderLines}`;
+}
+
 function resolveFilePathCandidate(pathValue: string, directive: string, history: ChatMessage[], fileTree: unknown, workingDirectory = "") {
   const normalized = normalizePathSeparators(pathValue).replace(/\/+$/, "");
   if (!normalized) return "";
 
   const nodes = flattenFileTree(fileTree);
   const fileNodes = nodes.filter((node) => isFileNode(node) && typeof node.path === "string");
-  const folderNames = getRequestedFolderNames(`${directive}\n${history.slice(-8).map((message) => message.content).join("\n")}`);
+  const folderNames = getRelevantFolderNames(directive, history);
   const lowerCandidate = normalized.toLowerCase();
   const candidateName = getFileName(normalized).toLowerCase();
 
@@ -365,14 +435,7 @@ function resolveFilePathCandidate(pathValue: string, directive: string, history:
 }
 
 function constrainPathsToRequestedFolder(paths: string[], directive: string, history: ChatMessage[], fileTree: unknown) {
-  const currentFolderNames = getRequestedFolderNames(directive);
-  const shouldUseHistoryFolder = /\b(it|that|those|both|all|each|them|inside it|the folder|the files)\b/i.test(directive)
-    || !/\b[\w.-]+\.[A-Za-z0-9]{1,8}\b/.test(directive);
-  const folderNames = currentFolderNames.length > 0
-    ? currentFolderNames
-    : shouldUseHistoryFolder
-      ? getRequestedFolderNames(history.slice(-8).map((message) => message.content).join("\n"))
-      : [];
+  const folderNames = getRelevantFolderNames(directive, history);
   if (folderNames.length === 0) return paths;
 
   const scoped = paths.filter((pathValue) => folderNames.some((folderName) => pathIsUnderFolder(pathValue, folderName)));
@@ -531,6 +594,45 @@ function tryBuildSimpleReplacementContent(directive: string, content: string) {
     from: replacement.from,
     to: replacement.to,
   };
+}
+
+function parseCodewordAssignment(directive: string) {
+  const patterns = [
+    /\bcode\s*word\b.*?\b(?:to be|to|as|=)\s+["'`]?(.+?)["'`]?(?=\s+(?:in|inside|from|on)\b|$|[.?!])/i,
+    /\bcodeword\b.*?\b(?:to be|to|as|=)\s+["'`]?(.+?)["'`]?(?=\s+(?:in|inside|from|on)\b|$|[.?!])/i,
+  ];
+
+  for (const pattern of patterns) {
+    const match = directive.match(pattern);
+    const value = cleanReplacementTerm(match?.[1] || "");
+    if (value && !/^code\s*word\s*:?\s*$/i.test(value)) return value;
+  }
+
+  return null;
+}
+
+function tryBuildCodewordReplacementContent(directive: string, content: string) {
+  const newCodeword = parseCodewordAssignment(directive);
+  if (!newCodeword) return null;
+
+  const cleaned = stripFileContentWrapper(content);
+  const newline = cleaned.includes("\r\n") ? "\r\n" : "\n";
+  const lines = cleaned.split(/\r?\n/);
+  const labeledIndex = lines.findIndex((line) => /^\s*code\s*word\s*[:=-]/i.test(line));
+
+  if (labeledIndex >= 0) {
+    const prefix = lines[labeledIndex].match(/^(\s*code\s*word\s*[:=-]\s*)/i)?.[1] || "Codeword: ";
+    lines[labeledIndex] = `${prefix}${newCodeword}`;
+    return { content: lines.join(newline), codeword: newCodeword };
+  }
+
+  const firstContentIndex = lines.findIndex((line) => line.trim().length > 0);
+  if (firstContentIndex >= 0) {
+    lines[firstContentIndex] = `Codeword: ${newCodeword}`;
+    return { content: lines.join(newline), codeword: newCodeword };
+  }
+
+  return { content: `Codeword: ${newCodeword}`, codeword: newCodeword };
 }
 
 function buildFileReadResponse(directive: string, path: string, content: string, openedInspector: boolean, shouldRedact = false) {
@@ -740,6 +842,15 @@ export function NeuralCommand() {
       return;
     }
 
+    if (!isSilent && wantsFolderInventory(input, localHistory)) {
+      const inventoryResponse = buildFolderInventoryResponse(input, localHistory, fileTree);
+      if (inventoryResponse) {
+        addManualLog("FILESYSTEM_TREE", `Answered folder inventory without reading file contents`);
+        appendModelMessage(localHistory, inventoryResponse);
+        return;
+      }
+    }
+
     if (!isSilent && wantsRevertDirective(input)) {
       setIsLoading(true);
       try {
@@ -861,6 +972,17 @@ export function NeuralCommand() {
           if (!lastReadSnapshot) return;
 
           if (!openInspector && readSnapshots.length === 1 && wantsEditDirective(rootDirective)) {
+            const codewordEdit = tryBuildCodewordReplacementContent(rootDirective, lastReadSnapshot.content);
+            if (codewordEdit) {
+              const snapshot = await executeWriteFile(lastReadSnapshot.path, codewordEdit.content);
+              localHistory = appendModelMessage(
+                localHistory,
+                `Updated the codeword to "${codewordEdit.codeword}" in ${getFileName(lastReadSnapshot.path)}.\n${buildFileWriteResponse(lastReadSnapshot.path, codewordEdit.content, snapshot.existed)}`,
+                "WRITE_FILE",
+              );
+              return;
+            }
+
             const simpleEdit = tryBuildSimpleReplacementContent(rootDirective, lastReadSnapshot.content);
             if (simpleEdit) {
               const snapshot = await executeWriteFile(lastReadSnapshot.path, simpleEdit.content);
@@ -942,11 +1064,20 @@ Tell the user the file could not be read and include the failure reason.`,
               );
               break;
             }
-            const content = getWriteFileContent(payload);
-            const snapshot = await executeWriteFile(writePath, content);
+            const modelContent = getWriteFileContent(payload);
+            const snapshot = await cacheFileBeforeMutation(writePath);
+            const codewordEdit = snapshot.content !== null
+              ? tryBuildCodewordReplacementContent(rootDirective, snapshot.content)
+              : null;
+            const content = codewordEdit?.content || modelContent;
+            await nexus.writeFile(writePath, content);
+            lastMutationPathRef.current = writePath;
+            setLastAgentReadFile({ path: writePath, content });
             localHistory = appendModelMessage(
               localHistory,
-              buildFileWriteResponse(writePath, content, snapshot.existed),
+              codewordEdit
+                ? `Updated the codeword to "${codewordEdit.codeword}" in ${getFileName(writePath)}.\n${buildFileWriteResponse(writePath, content, snapshot.existed)}`
+                : buildFileWriteResponse(writePath, content, snapshot.existed),
               "WRITE_FILE",
             );
             break;
