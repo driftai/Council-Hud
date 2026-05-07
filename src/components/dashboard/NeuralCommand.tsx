@@ -66,6 +66,13 @@ type SessionMemory = {
   fileEvents: string[];
 };
 
+type DirectoryNavigationContext = {
+  directive: string;
+  fromPath: string;
+  toPath: string;
+  foldersBefore: FileTreeNode[];
+};
+
 type FileTreeNode = {
   name?: string;
   path?: string;
@@ -122,6 +129,10 @@ function wantsPlainOutput(directive: string) {
 function wantsLocalPathUnredaction(directive: string) {
   return /\b(?:un\s*redact|unredact|no need to redact|dont redact|don't redact|do not redact|without redacting)\b[\s\S]*(?:user\s*name|username|user|name|path)?/i.test(directive)
     || /\b(?:show|send|use)\b[\s\S]*(?:full|real|raw)\s+(?:user\s*)?(?:path|name|username)\b/i.test(directive);
+}
+
+function wantsLocalPathRedaction(directive: string) {
+  return /\b(?:redact|hide|mask|censor)\b[\s\S]*(?:user\s*name|username|user|local\s+path|path)\b/i.test(directive);
 }
 
 function wantsExplicitOpen(directive: string) {
@@ -764,11 +775,7 @@ function getDirectFolderNodes(fileTree: unknown) {
   return getTopLevelTreeNodes(fileTree).filter((node) => isFolderNode(node));
 }
 
-function getOrdinalFolderIndex(directive: string) {
-  const normalized = directive.toLowerCase();
-  const numeric = normalized.match(/\b(\d{1,2})(?:st|nd|rd|th)?\s+folders?\b/);
-  if (numeric) return Number(numeric[1]) - 1;
-
+function getOrdinalWordIndex(value: string) {
   const ordinals: Record<string, number> = {
     first: 0,
     second: 1,
@@ -782,9 +789,31 @@ function getOrdinalFolderIndex(directive: string) {
     ninth: 8,
     tenth: 9,
   };
+  return Object.prototype.hasOwnProperty.call(ordinals, value.toLowerCase())
+    ? ordinals[value.toLowerCase()]
+    : -1;
+}
 
-  for (const [word, index] of Object.entries(ordinals)) {
-    if (new RegExp(`\\b${word}\\s+folders?\\b`).test(normalized)) return index;
+function getOrdinalFolderIndex(directive: string, folderCount = 0) {
+  const normalized = directive.toLowerCase();
+  const numericToLast = normalized.match(/\b(\d{1,2})(?:st|nd|rd|th)?\s+(?:to|from)\s+last\s+folders?\b/);
+  if (numericToLast && folderCount > 0) {
+    return Math.max(0, folderCount - Number(numericToLast[1]));
+  }
+
+  const wordToLast = normalized.match(/\b(first|second|secound|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth)\s+(?:to|from)\s+last\s+folders?\b/);
+  if (wordToLast && folderCount > 0) {
+    const offset = getOrdinalWordIndex(wordToLast[1]) + 1;
+    return Math.max(0, folderCount - offset);
+  }
+
+  if (/\blast\s+folders?\b/.test(normalized) && folderCount > 0) return folderCount - 1;
+
+  const numeric = normalized.match(/\b(\d{1,2})(?:st|nd|rd|th)?\s+folders?\b/);
+  if (numeric) return Number(numeric[1]) - 1;
+
+  for (const word of ["first", "second", "secound", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth", "tenth"]) {
+    if (new RegExp(`\\b${word}\\s+folders?\\b`).test(normalized)) return getOrdinalWordIndex(word);
   }
 
   return -1;
@@ -792,7 +821,10 @@ function getOrdinalFolderIndex(directive: string) {
 
 function getNavigationFolderQuery(directive: string) {
   const patterns = [
+    /\b(?:take|send)\s+(?:us|me)?\s*(?:to|into|inside)\s+(?:the\s+)?(.+?)(?:\s+folder)?[?.!]*$/i,
     /\b(?:go|move|navigate|jump|enter|open)\s+(?:into|in|to|inside)\s+(?:the\s+)?(.+?)(?:\s+folder)?[?.!]*$/i,
+    /\b(?:go|move|navigate|jump|enter|open)\s+(?:the\s+)?(.+?)(?:\s+folder)?[?.!]*$/i,
+    /\bback\s+(?:inside|into|in)\s+(?:the\s+)?(.+?)(?:\s+folder)?(?:\s+and\b|[?.!]*$)/i,
     /\b(?:set|change)\s+(?:the\s+)?(?:recursive\s+mirror\s+)?(?:path|folder|directory)\s+(?:to|as)\s+(?:the\s+)?(.+?)(?:\s+folder)?[?.!]*$/i,
   ];
 
@@ -809,10 +841,28 @@ function getNavigationFolderQuery(directive: string) {
   return "";
 }
 
+function cleanBareFolderDirective(directive: string) {
+  return directive
+    .replace(/[?.!,;:]+$/g, "")
+    .replace(/\b(?:ok|okay|now|please|pls|then)\b/gi, " ")
+    .replace(/\b(?:folder|directory)\b/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 function wantsDirectoryNavigation(directive: string) {
   const text = directive.toLowerCase();
   if (wantsEditDirective(directive) || wantsDeleteDirective(directive)) return false;
+  if (/\b[\w.-]+\.[A-Za-z0-9]{1,8}\b/.test(directive)) return false;
   return /\b(?:go|move|navigate|jump|enter|open)\s+(?:into|in|to|inside)\b[\s\S]*\bfolders?\b/i.test(directive)
+    || /\b(?:go|move|navigate|jump|enter|open|take|send)\b[\s\S]*\b(?:unidex|documents|workshop|folder)\b/i.test(directive)
+    || /\b(?:go|move|navigate|jump)\b[\s\S]*\bparent\b[\s\S]*\b(?:enter|open|go|take)\b/i.test(directive)
+    || /\bback\s+(?:inside|into|in)\b/i.test(directive)
+    || /\bi\s+meant\b/i.test(directive)
+    || /\bnow\s+(?:in|inside|into)\b[\s\S]*(?:folders?|last)\b/i.test(directive)
+    || /\b(?:\d{1,2}(?:st|nd|rd|th)?|first|second|secound|third|fourth|fifth)\s+(?:to|from)\s+last\s+folders?\b/i.test(directive)
+    || /\blast\s+folders?\b/i.test(directive)
+    || /\b(?:enter|open|take|send)\b\s+[\w -]{2,80}$/i.test(directive.trim())
     || /\b(?:go|move|navigate|jump|take)\s+(?:us|use|me)?\s*back\b/i.test(directive)
     || /\b(?:go|move|navigate|jump)\s+up\b/i.test(text)
     || /\b(?:parent|previous)\s+folders?\b/i.test(directive)
@@ -841,22 +891,94 @@ function resolveDirectoryPathCandidate(pathValue: string, fileTree: unknown, wor
   return currentRoot ? `${currentRoot}/${normalized}` : normalized;
 }
 
-function getDirectoryNavigationTarget(directive: string, fileTree: unknown, workingDirectory = "") {
+function resolveDirectFolderPathCandidate(pathValue: string, fileTree: unknown) {
+  const normalized = normalizePathSeparators(pathValue).replace(/\/+$/, "");
+  if (!normalized) return "";
+
+  const directMatch = getDirectFolderNodes(fileTree).find((node) => {
+    const nodeName = String(node.name || (node.path ? getFileName(node.path) : ""));
+    return folderNameMatchesQuery(nodeName, normalized);
+  });
+  return directMatch?.path ? normalizePathSeparators(directMatch.path) : "";
+}
+
+function getNavigationCorrectionTarget(directive: string, context: DirectoryNavigationContext | null) {
+  if (!context || !/\bi\s+meant\b|\bnot\b/i.test(directive)) return "";
+  const text = directive.toLowerCase();
+  const previousText = context.directive.toLowerCase();
+  const folderCount = context.foldersBefore.length;
+
+  let index = getOrdinalFolderIndex(directive, folderCount);
+  if (index < 0 && /\bsecond\b|\bsecound\b|\b2nd\b/i.test(directive) && /\blast\b|send\s+to\s+last/i.test(previousText)) {
+    index = Math.max(0, folderCount - 2);
+  }
+  if (index < 0 && /\bfirst\b|\b1st\b/i.test(directive)) index = 0;
+  if (index < 0) return "";
+
+  const folder = context.foldersBefore[index];
+  return folder?.path ? normalizePathSeparators(folder.path) : "";
+}
+
+function getParentThenChildNavigationTarget(directive: string, fileTree: unknown, workingDirectory = "") {
+  if (!/\bparent\b[\s\S]*\b(?:enter|open|go|take)\b/i.test(directive)) return "";
+  const currentRoot = getCurrentTreeRootPath(fileTree, workingDirectory);
+  if (!currentRoot) return "";
+
+  const childMatches = Array.from(
+    directive.matchAll(/\b(?:and\s+)?(?:enter|open)\s+(?:into|in|to|inside)?\s*(?:the\s+)?(.+?)(?:\s+folder)?(?=$|[?.!])/gi)
+  );
+  const query = childMatches.at(-1)?.[1]
+    ?.replace(/\bfolders?\b/ig, "")
+    .replace(/\bthe\b/ig, "")
+    .trim() || "";
+  if (!query) return getParentPath(currentRoot);
+
+  const parentPath = getParentPath(currentRoot);
+  return { parentPath, query };
+}
+
+function getDirectoryNavigationTarget(
+  directive: string,
+  fileTree: unknown,
+  workingDirectory = "",
+  returnInsideTarget = "",
+  lastNavigation: DirectoryNavigationContext | null = null,
+) {
+  const correctionTarget = getNavigationCorrectionTarget(directive, lastNavigation);
+  if (correctionTarget) return correctionTarget;
+
   const currentRoot = getCurrentTreeRootPath(fileTree, workingDirectory);
   const text = directive.toLowerCase();
+  const wantsReturnInside = /\bback\s+(?:inside|into|in)\s+(?:it|that|there|folder)\b/i.test(directive)
+    || /\bback\s+(?:inside|into|in)\b/i.test(directive);
+  if (wantsReturnInside && returnInsideTarget) {
+    const normalizedReturnTarget = normalizePathSeparators(returnInsideTarget).replace(/\/+$/, "");
+    if (!currentRoot || getParentPath(normalizedReturnTarget).toLowerCase() === currentRoot.toLowerCase()) {
+      return normalizedReturnTarget;
+    }
+  }
+
   const wantsParent = /\b(?:go|move|navigate|jump|take)\s+(?:us|use|me)?\s*back\b/i.test(directive)
     || /\b(?:go|move|navigate|jump)\s+up\b/i.test(text)
     || /\b(?:parent|previous)\s+folders?\b/i.test(directive);
   if (wantsParent) return currentRoot ? getParentPath(currentRoot) : "";
 
-  const ordinalIndex = getOrdinalFolderIndex(directive);
+  const directFolders = getDirectFolderNodes(fileTree);
+  const ordinalIndex = getOrdinalFolderIndex(directive, directFolders.length);
   if (ordinalIndex >= 0) {
-    const folder = getDirectFolderNodes(fileTree)[ordinalIndex];
+    const folder = directFolders[ordinalIndex];
     return folder?.path ? normalizePathSeparators(folder.path) : "";
   }
 
   const query = getNavigationFolderQuery(directive);
-  return query ? resolveDirectoryPathCandidate(query, fileTree, workingDirectory) : "";
+  if (query) return resolveDirectoryPathCandidate(query, fileTree, workingDirectory);
+
+  const bareQuery = cleanBareFolderDirective(directive);
+  if (bareQuery && bareQuery.split(/\s+/).length <= 5) {
+    return resolveDirectFolderPathCandidate(bareQuery, fileTree);
+  }
+
+  return "";
 }
 
 function getDirectoryContextLines(fileTree: unknown, currentRoot: string, workingDirectory = "") {
@@ -1432,7 +1554,9 @@ export function NeuralCommand() {
   const fileEditCacheRef = useRef<Map<string, FileEditSnapshot>>(new Map());
   const lastMutationPathRef = useRef<string | null>(null);
   const codewordHistoryRef = useRef<string[]>([]);
-  const revealLocalUserPathsRef = useRef(false);
+  const revealLocalUserPathsRef = useRef(true);
+  const returnInsideFolderRef = useRef<string | null>(null);
+  const lastDirectoryNavigationRef = useRef<DirectoryNavigationContext | null>(null);
   const sessionMemoryRef = useRef<SessionMemory>({
     recentFiles: [],
     recentUserIntents: [],
@@ -1811,19 +1935,73 @@ export function NeuralCommand() {
     return appendModelMessage(history, buildFolderOnlyResponse(fileTree, "the current Recursive Mirror root"));
   };
 
-  const handleDirectoryNavigationRequest = async (input: string, history: ChatMessage[]) => {
-    const targetPath = getDirectoryNavigationTarget(input, fileTree, workingDirectory);
+  const executeDirectorySetPath = async (
+    input: string,
+    history: ChatMessage[],
+    targetPath: string,
+    fromPath: string,
+    foldersBefore: FileTreeNode[],
+  ) => {
+    const response = await nexus.sendCommand("SET_PATH", { path: targetPath, depth: 1 });
+    const { path } = extractTreePayload(response);
+    const resolvedTarget = normalizePathSeparators(path || targetPath).replace(/\/+$/, "");
+
+    lastDirectoryNavigationRef.current = {
+      directive: input,
+      fromPath,
+      toPath: resolvedTarget,
+      foldersBefore,
+    };
+
+    if (fromPath && getParentPath(fromPath).toLowerCase() === resolvedTarget.toLowerCase()) {
+      returnInsideFolderRef.current = fromPath;
+    } else if (
+      returnInsideFolderRef.current
+      && normalizePathSeparators(returnInsideFolderRef.current).replace(/\/+$/, "").toLowerCase() === resolvedTarget.toLowerCase()
+    ) {
+      returnInsideFolderRef.current = null;
+    }
+
+    return appendModelMessage(
+      history,
+      buildDirectorySetPathResponse(response, targetPath, displaySensitiveText),
+      "SET_PATH",
+    );
+  };
+
+  const handleDirectoryNavigationRequest = async (input: string, history: ChatMessage[], preResolvedTarget = "") => {
+    const currentRoot = getCurrentTreeRootPath(fileTree, workingDirectory);
+    const foldersBefore = getDirectFolderNodes(fileTree);
+    const parentThenChild = getParentThenChildNavigationTarget(input, fileTree, workingDirectory);
+
+    if (parentThenChild && typeof parentThenChild === "object") {
+      try {
+        const parentResponse = await nexus.sendCommand("SET_PATH", { path: parentThenChild.parentPath, depth: 1 });
+        const { tree, path } = extractTreePayload(parentResponse);
+        const parentPath = normalizePathSeparators(path || parentThenChild.parentPath).replace(/\/+$/, "");
+        const childPath = resolveDirectoryPathCandidate(parentThenChild.query, tree, parentPath);
+        if (!childPath) {
+          return appendModelMessage(history, buildDirectorySetPathResponse(parentResponse, parentPath, displaySensitiveText), "SET_PATH");
+        }
+        return executeDirectorySetPath(input, history, childPath, parentPath, getDirectFolderNodes(tree));
+      } catch (error: any) {
+        return appendModelMessage(history, `I could not navigate there: ${error.message || "Unknown error"}`, "SET_PATH");
+      }
+    }
+
+    const targetPath = preResolvedTarget || getDirectoryNavigationTarget(
+      input,
+      fileTree,
+      workingDirectory,
+      returnInsideFolderRef.current || "",
+      lastDirectoryNavigationRef.current,
+    );
     if (!targetPath) {
       return appendModelMessage(history, "I could not resolve the folder to navigate to.");
     }
 
     try {
-      const response = await nexus.sendCommand("SET_PATH", { path: targetPath, depth: 1 });
-      return appendModelMessage(
-        history,
-        buildDirectorySetPathResponse(response, targetPath, displaySensitiveText),
-        "SET_PATH",
-      );
+      return executeDirectorySetPath(input, history, targetPath, currentRoot, foldersBefore);
     } catch (error: any) {
       return appendModelMessage(history, `I could not navigate there: ${error.message || "Unknown error"}`, "SET_PATH");
     }
@@ -2080,6 +2258,15 @@ For emoji-only requests, payload.content must contain visible emoji only plus wh
       setMessages([...localHistory]);
     }
 
+    if (!isSilent && wantsLocalPathRedaction(input)) {
+      revealLocalUserPathsRef.current = false;
+      appendModelMessage(
+        localHistory,
+        "Understood. I will redact local user path names again, while still redacting secrets either way.",
+      );
+      return;
+    }
+
     if (!isSilent && wantsLocalPathUnredaction(input)) {
       revealLocalUserPathsRef.current = true;
       const hasFollowupRequest = wantsCurrentFolderQuestion(input)
@@ -2161,10 +2348,18 @@ For emoji-only requests, payload.content must contain visible emoji only plus wh
       return;
     }
 
-    if (!isSilent && wantsDirectoryNavigation(input)) {
+    const visibleDirectoryNavigationTarget = getDirectoryNavigationTarget(
+      input,
+      fileTree,
+      workingDirectory,
+      returnInsideFolderRef.current || "",
+      lastDirectoryNavigationRef.current,
+    );
+
+    if (!isSilent && (wantsDirectoryNavigation(input) || visibleDirectoryNavigationTarget)) {
       setIsLoading(true);
       try {
-        await handleDirectoryNavigationRequest(input, localHistory);
+        await handleDirectoryNavigationRequest(input, localHistory, visibleDirectoryNavigationTarget);
       } finally {
         setIsLoading(false);
       }
@@ -2360,17 +2555,19 @@ For emoji-only requests, payload.content must contain visible emoji only plus wh
         };
       }
 
-      const modelMsg: ChatMessage = {
-        role: 'model',
-        content: result.command === "READ_FILE"
-          ? buildNeutralReadCommandMessage(result.payload || {})
-          : humanizeModelMessage(result.message, shouldRedactTurn, displaySensitiveText),
-        command: result.command !== "NONE" ? result.command : undefined,
-        timestamp: Date.now()
-      };
-      
-      localHistory = [...localHistory, modelMsg];
-      setMessages([...localHistory]);
+      if (result.command !== "SET_PATH") {
+        const modelMsg: ChatMessage = {
+          role: 'model',
+          content: result.command === "READ_FILE"
+            ? buildNeutralReadCommandMessage(result.payload || {})
+            : humanizeModelMessage(result.message, shouldRedactTurn, displaySensitiveText),
+          command: result.command !== "NONE" ? result.command : undefined,
+          timestamp: Date.now()
+        };
+
+        localHistory = [...localHistory, modelMsg];
+        setMessages([...localHistory]);
+      }
 
       if (result.thought) addManualLog("NEURAL", result.thought);
       const allowSilentFollowupRead = result.command === "READ_FILE"
@@ -2515,12 +2712,8 @@ Tell the user the file could not be read and include the failure reason.`,
               localHistory = appendModelMessage(localHistory, "I need a target folder before I can navigate.", "SET_PATH");
               break;
             }
-            const response = await nexus.sendCommand("SET_PATH", { path: targetPath, depth: 1 });
-            localHistory = appendModelMessage(
-              localHistory,
-              buildDirectorySetPathResponse(response, targetPath, displaySensitiveText),
-              "SET_PATH",
-            );
+            const currentRoot = getCurrentTreeRootPath(fileTree, workingDirectory);
+            localHistory = await executeDirectorySetPath(rootDirective, localHistory, targetPath, currentRoot, getDirectFolderNodes(fileTree));
             break;
           }
           case "WRITE_FILE": {
