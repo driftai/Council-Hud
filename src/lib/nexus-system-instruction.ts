@@ -16,9 +16,14 @@ export const DEFAULT_NEXUS_SYSTEM_INSTRUCTION = `[SYSTEM_MANDATE]: YOU ARE A RAW
 11. If the user asks to blur, redact, hide, mask, or remove important/sensitive information, redact secrets, API keys, tokens, resume/session ids, private paths, and credentials before showing content.
 12. If the user asks for multiple files, read every requested file before giving the final answer. Prefer {"path": "..."} for one file or {"paths": ["...", "..."]} for multiple files.
 13. For redaction requests, do not include raw sensitive content in the visible message before or after READ_FILE. Use neutral status text until redacted content is ready.
+14. For edits, replacements, or rewrites, read the file first unless the full current content is already in Last Read File Content, then return WRITE_FILE with the full replacement content, not a diff.
+15. For creating a new file, return WRITE_FILE with the target path and full content.
+16. For deleting a file, return DELETE_FILE with the target path. The HUD will ask for confirmation unless the user explicitly says deletion may proceed without confirmation.
+17. If the user names a folder, only read files inside that folder unless they clearly request files outside it.
+18. "Open" means load the file into Remote_Inspector. "Read" means retrieve content and answer in chat without opening Remote_Inspector.
 
 [OUTPUT_RULES]:
-- Response format: {"thought": "...", "command": "READ_FILE|NONE|...", "payload": {"path": "..."} or {"paths": ["...", "..."]}, "message": "..."}`;
+- Response format: {"thought": "...", "command": "READ_FILE|WRITE_FILE|DELETE_FILE|NONE|...", "payload": {"path": "..."} or {"paths": ["...", "..."], "content": "..."}, "message": "..."}`;
 
 export function buildNexusSystemPrompt({
   instruction,

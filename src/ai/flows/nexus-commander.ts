@@ -41,13 +41,13 @@ export type NexusCommandInput = z.infer<typeof NexusCommandInputSchema>;
 
 const NexusCommandOutputSchema = z.object({
   thought: z.string().describe('The internal reasoning.'),
-  command: z.enum(['SET_PATH', 'KILL_PROCESS', 'READ_FILE', 'WRITE_FILE', 'NONE']).describe('The command.'),
+  command: z.enum(['SET_PATH', 'KILL_PROCESS', 'READ_FILE', 'WRITE_FILE', 'DELETE_FILE', 'NONE']).describe('The command.'),
   payload: z.record(z.any()).describe('The arguments.'),
   message: z.string().describe('The UI-facing response.'),
 });
 export type NexusCommandOutput = z.infer<typeof NexusCommandOutputSchema>;
 
-const COMMANDS = ['SET_PATH', 'KILL_PROCESS', 'READ_FILE', 'WRITE_FILE', 'NONE'] as const;
+const COMMANDS = ['SET_PATH', 'KILL_PROCESS', 'READ_FILE', 'WRITE_FILE', 'DELETE_FILE', 'NONE'] as const;
 
 function stripCodeFence(value: string) {
   const trimmed = value.trim();

@@ -508,6 +508,18 @@ app.post('/write-file', requireAuth, (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+app.post('/delete-file', requireAuth, (req, res) => {
+    const requestedPath = firstString(req.body?.path, req.body?.filepath);
+    if (!requestedPath) return res.status(400).json({ error: "Invalid delete payload" });
+    const target = translatePath(requestedPath);
+    try {
+        if (!fs.existsSync(target)) return res.status(404).json({ error: "Not Found" });
+        if (!fs.statSync(target).isFile()) return res.status(400).json({ error: "Delete only supports files" });
+        fs.unlinkSync(target);
+        res.json(wrap({ status: "success", path: target }, 'STABLE', 'FILE_DELETE'));
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 app.post('/exec', requireAuth, (req, res) => {
     if (!EXEC_ENABLED) return res.status(403).json({ error: "Exec endpoint disabled" });
     const command = firstString(req.body?.command);

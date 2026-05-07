@@ -38,6 +38,7 @@ interface NexusContextType {
   sendCommand: (cmd: string, payload: any) => Promise<any>;
   readFile: (path: string, options?: ReadFileOptions) => Promise<string | null>;
   writeFile: (path: string, content: string) => Promise<void>;
+  deleteFile: (path: string) => Promise<void>;
   killProcess: (pid: number) => Promise<void>;
   addManualLog: (type: string, payload: any) => void;
   clearLogs: () => void;
@@ -219,6 +220,9 @@ export function NexusProvider({ children }: { children: React.ReactNode }) {
       bodyPayload = { path: payload.path };
     } else if (cmd === 'WRITE_FILE') {
       endpoint = '/write-file';
+    } else if (cmd === 'DELETE_FILE') {
+      endpoint = '/delete-file';
+      bodyPayload = { path: payload.path };
     } else if (cmd === 'SET_PATH') {
       endpoint = '/filesystem/tree';
       bodyPayload = { path: payload.path, reset: payload.reset, depth: payload.depth };
@@ -284,6 +288,18 @@ export function NexusProvider({ children }: { children: React.ReactNode }) {
     }
   }, [sendCommand, addManualLog]);
 
+  const deleteFile = useCallback(async (path: string) => {
+    if (!clientRef.current || !path) return;
+    try {
+      await sendCommand("DELETE_FILE", { path });
+      setFileContent(prev => prev?.path === path ? null : prev);
+      addManualLog("FILE_DELETE", { path });
+    } catch (e: any) {
+      addManualLog("ERROR", `Delete Failure: ${e.message}`);
+      throw e;
+    }
+  }, [sendCommand, addManualLog]);
+
   const killProcess = useCallback(async (pid: number) => {
     await sendCommand("KILL_PROCESS", { pid });
   }, [sendCommand]);
@@ -297,7 +313,7 @@ export function NexusProvider({ children }: { children: React.ReactNode }) {
     <NexusContext.Provider value={{ 
       state, systemHealth, knowledgeGraph, fileChanges, fileTree, nexusLogs,
       lastUpdate, url, nexusKey, status, fileContent, consecutiveFailures, workingDirectory,
-      setFileContent, refreshTelemetry: fetchData, authorize, sendCommand, readFile, writeFile, killProcess, addManualLog, clearLogs, updateUrl, updateKey
+      setFileContent, refreshTelemetry: fetchData, authorize, sendCommand, readFile, writeFile, deleteFile, killProcess, addManualLog, clearLogs, updateUrl, updateKey
     }}>
       {children}
     </NexusContext.Provider>
