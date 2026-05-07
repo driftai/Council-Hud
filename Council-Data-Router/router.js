@@ -520,6 +520,24 @@ app.post('/delete-file', requireAuth, (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+app.post('/rename-file', requireAuth, (req, res) => {
+    const requestedFromPath = firstString(req.body?.fromPath, req.body?.from_path, req.body?.sourcePath, req.body?.source);
+    const requestedToPath = firstString(req.body?.toPath, req.body?.to_path, req.body?.targetPath, req.body?.destination);
+    if (!requestedFromPath || !requestedToPath) return res.status(400).json({ error: "Invalid rename payload" });
+
+    const source = translatePath(requestedFromPath);
+    const destination = translatePath(requestedToPath);
+
+    try {
+        if (!fs.existsSync(source)) return res.status(404).json({ error: "Source not found" });
+        if (!fs.statSync(source).isFile()) return res.status(400).json({ error: "Rename only supports files" });
+        if (fs.existsSync(destination)) return res.status(409).json({ error: "Destination already exists" });
+        if (!fs.existsSync(path.dirname(destination))) fs.mkdirSync(path.dirname(destination), { recursive: true });
+        fs.renameSync(source, destination);
+        res.json(wrap({ status: "success", fromPath: source, toPath: destination }, 'STABLE', 'FILE_RENAME'));
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 app.post('/exec', requireAuth, (req, res) => {
     if (!EXEC_ENABLED) return res.status(403).json({ error: "Exec endpoint disabled" });
     const command = firstString(req.body?.command);

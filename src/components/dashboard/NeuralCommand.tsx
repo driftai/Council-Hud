@@ -77,6 +77,13 @@ function normalizePathSeparators(path: string) {
   return path.replace(/\\/g, "/");
 }
 
+function getParentPath(path: string) {
+  const normalized = normalizePathSeparators(path).replace(/\/+$/, "");
+  const parts = normalized.split("/");
+  if (parts.length <= 1) return normalized;
+  return parts.slice(0, -1).join("/");
+}
+
 function getFileName(path: string) {
   return normalizePathSeparators(path).split("/").filter(Boolean).pop() || path;
 }
@@ -112,6 +119,11 @@ function wantsPlainOutput(directive: string) {
   return /\b(unredacted|no redaction|without redaction|plain extract|raw extract|show the sensitive|show sensitive)\b/.test(text);
 }
 
+function wantsLocalPathUnredaction(directive: string) {
+  return /\b(?:un\s*redact|unredact|no need to redact|dont redact|don't redact|do not redact|without redacting)\b[\s\S]*(?:user\s*name|username|user|name|path)?/i.test(directive)
+    || /\b(?:show|send|use)\b[\s\S]*(?:full|real|raw)\s+(?:user\s*)?(?:path|name|username)\b/i.test(directive);
+}
+
 function wantsExplicitOpen(directive: string) {
   return /\b(open|pull up)\b/i.test(directive);
 }
@@ -130,7 +142,7 @@ function wantsDeleteDirective(directive: string) {
 }
 
 function wantsRevertDirective(directive: string) {
-  return /\b(revert|undo|roll back|restore previous|previous state|back to where)\b/i.test(directive);
+  return /\b(revert|undo|roll back|restore previous|previous state|back to where|put .* back|back to how it was|restore .* how it was)\b/i.test(directive);
 }
 
 function wantsSessionFirstQuestion(directive: string) {
@@ -143,6 +155,25 @@ function wantsSessionFirstQuestion(directive: string) {
 
 function wantsSessionMemoryComplaint(directive: string) {
   return /\b(no|not)\s+mem+or(?:y|ies)\b|\bno\s+mem+emory\b|\bforgot\b.*\b(session|chat|chatlog|conversation)\b/i.test(directive);
+}
+
+function wantsToolMisfireComplaint(directive: string) {
+  return /\b(mis\s*firing|miss\s*firing|misfire|wrong tool|stiff stuff|too stiff|too rigid|why.*read|should(?:n'|’)?t.*read)\b/i.test(directive);
+}
+
+function wantsSessionMessageCount(directive: string) {
+  return /\bhow\s+many\b[\s\S]*\b(messages?|prompts?|things)\b[\s\S]*\b(i|user)\b[\s\S]*\b(sent|asked|said|typed)\b/i.test(directive)
+    || /\bcount\b[\s\S]*\b(my|user)\b[\s\S]*\b(messages?|prompts?)\b/i.test(directive);
+}
+
+function wantsSessionActionSummary(directive: string) {
+  return /\bwhat\b[\s\S]*\b(things|stuff|actions|tasks)\b[\s\S]*\b(i|we)\b[\s\S]*\b(had|asked|did|done)\b[\s\S]*\b(session|today|chat)\b/i.test(directive)
+    || /\bsummar(?:y|ize)\b[\s\S]*\b(session|chat|what we did|things i asked)\b/i.test(directive);
+}
+
+function wantsSessionEditRequestRecall(directive: string) {
+  return /\bwhat\b[\s\S]*\b(my|the)\b[\s\S]*\b(ask|request|prompt)\b[\s\S]*\b(edit|file edit|change)\b/i.test(directive)
+    || /\bwhat\b[\s\S]*\b(i|you)\b[\s\S]*\b(asked|said)\b[\s\S]*\b(edit|change)\b[\s\S]*\bfile\b/i.test(directive);
 }
 
 function wantsCodewordHistoryQuestion(directive: string) {
@@ -161,6 +192,34 @@ function wantsStatusNudge(directive: string) {
   return /^\s*(\?+|h+m+|hmm+|uh+|ok+\??)\s*$/i.test(directive);
 }
 
+function wantsCasualConversation(directive: string) {
+  const text = directive.toLowerCase();
+  const hasFileIntent = /\b(file|folder|txt|text\.txt|test\.txt|info\.txt|notes?|read|open|write|edit|change|delete|content|contents|code\s*word|codeword|system|process|cpu|ram|temp|router|uplink)\b/.test(text);
+  if (hasFileIntent) return false;
+  return /\b(tell me a joke|joke|make me laugh|boop|hi|hello|hey|silly|chat|good job|good work|good good|nice)\b/i.test(directive)
+    || /\b(tell me|give me)\b[\s\S]*\b(new|another)\b[\s\S]*\b(one|joke)\b/i.test(directive);
+}
+
+function buildCasualResponse(directive: string) {
+  const text = directive.toLowerCase();
+  if (/\b(new|another)\b[\s\S]*\b(one|joke)\b/.test(text)) {
+    return "Why did the cache bring a notebook? It wanted to remember what actually happened.";
+  }
+  if (/\bjoke|make me laugh\b/.test(text)) {
+    return "Why did the function stop arguing? It finally returned.";
+  }
+  if (/\bgood job|good work|good good|nice\b/.test(text)) {
+    return "Got it.";
+  }
+  if (/\bsilly\b/.test(text)) {
+    return "A little. I can loosen up without touching the file tools.";
+  }
+  if (/\bboop\b/.test(text)) {
+    return "Boop received. Neural tools staying holstered until you ask for them.";
+  }
+  return "I’m here. What do you want to work on?";
+}
+
 function shouldRedactForTurn(rootDirective: string, history: ChatMessage[]) {
   if (wantsPlainOutput(rootDirective)) return false;
   if (wantsExplicitOpen(rootDirective) && !wantsRedaction(rootDirective)) return false;
@@ -175,7 +234,7 @@ function shouldRedactForTurn(rootDirective: string, history: ChatMessage[]) {
   return currentContinuesFileRequest && wantsRedaction(recentUserText) && !wantsPlainOutput(recentUserText);
 }
 
-function redactSensitiveContent(value: string) {
+function redactHighConfidenceSecrets(value: string) {
   return value
     .replace(/\bnvapi-[A-Za-z0-9_-]+/g, "[REDACTED_NVIDIA_API_KEY]")
     .replace(/(api\s*key\s*\d*\s*:\s*)[^\s\r\n]+/gi, "$1[REDACTED]")
@@ -183,7 +242,11 @@ function redactSensitiveContent(value: string) {
     .replace(/(secret\s*:\s*)[^\s\r\n]+/gi, "$1[REDACTED]")
     .replace(/(password\s*:\s*)[^\s\r\n]+/gi, "$1[REDACTED]")
     .replace(/(codex\s+resume\s+)[A-Za-z0-9-]+/gi, "$1[REDACTED_SESSION]")
-    .replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi, "[REDACTED_ID]")
+    .replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi, "[REDACTED_ID]");
+}
+
+function redactSensitiveContent(value: string) {
+  return redactHighConfidenceSecrets(value)
     .replace(/\bC:[/\\]Users[/\\][^/\\\r\n]+/gi, "C:/Users/[REDACTED_USER]");
 }
 
@@ -246,7 +309,7 @@ function humanizeObjectMessage(value: Record<string, unknown>) {
     .join("\n");
 }
 
-function humanizeModelMessage(message: string, shouldRedact = false) {
+function humanizeModelMessage(message: string, shouldRedact = false, redactor = redactSensitiveContent) {
   const parsed = parseMaybeJsonMessage(message);
   let display: string;
   if (parsed && !Array.isArray(parsed) && typeof parsed === "object") {
@@ -257,7 +320,7 @@ function humanizeModelMessage(message: string, shouldRedact = false) {
     display = normalizePathSeparators(message);
   }
 
-  return shouldRedact ? redactSensitiveContent(display) : display;
+  return shouldRedact ? redactor(display) : redactHighConfidenceSecrets(display);
 }
 
 function wantsInspectorOpen(directive: string, payload: Record<string, any>, shouldRedact = false) {
@@ -312,8 +375,14 @@ function wantsMultipleFileRead(directive: string) {
     || (/\band\b/.test(text) && /\b(file|files|txt|text)\b/.test(text));
 }
 
+function hasFileReference(directive: string) {
+  return getExplicitFileNames(directive).length > 0
+    || /\b(file|files|folder|folders|txt|text file|current file|that file|the file|it|inside it|content|contents|code\s*word|codeword|notes?|info)\b/i.test(directive);
+}
+
 function isFileReadDirective(directive: string) {
-  return /\b(read|what.*in|what.*says?|tell me|content|contents)\b/i.test(directive);
+  const asksForRead = /\b(read|open|show|view|what.*in|what.*says?|tell me what|content|contents)\b/i.test(directive);
+  return asksForRead && hasFileReference(directive);
 }
 
 function flattenFileTree(nodes: unknown): FileTreeNode[] {
@@ -406,8 +475,106 @@ function pathIsUnderFolder(pathValue: string, folderName: string) {
   return normalizePathSeparators(pathValue).toLowerCase().split("/").includes(folderName.toLowerCase());
 }
 
+function normalizeFolderLookupValue(value: string) {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+function compactFolderLookupValue(value: string) {
+  return normalizeFolderLookupValue(value).replace(/\s+/g, "");
+}
+
+function folderNameMatchesQuery(folderName: string, query: string) {
+  const normalizedFolder = normalizeFolderLookupValue(folderName);
+  const normalizedQuery = normalizeFolderLookupValue(query.replace(/\bfolders?\b|\bdirectory\b|\bthe\b/gi, ""));
+  if (!normalizedFolder || !normalizedQuery) return false;
+
+  const compactFolder = compactFolderLookupValue(normalizedFolder);
+  const compactQuery = compactFolderLookupValue(normalizedQuery);
+  return normalizedFolder === normalizedQuery
+    || normalizedFolder.includes(normalizedQuery)
+    || normalizedQuery.includes(normalizedFolder)
+    || compactFolder.includes(compactQuery)
+    || compactQuery.includes(compactFolder);
+}
+
+function getTopLevelTreeNodes(fileTree: unknown) {
+  return Array.isArray(fileTree) ? fileTree as FileTreeNode[] : [];
+}
+
+function getCurrentTreeRootPath(fileTree: unknown, workingDirectory = "") {
+  const normalizedWorkingDirectory = normalizePathSeparators(workingDirectory || "").replace(/\/+$/, "");
+  if (normalizedWorkingDirectory) return normalizedWorkingDirectory;
+
+  const firstNodePath = getTopLevelTreeNodes(fileTree)
+    .map((node) => typeof node.path === "string" ? normalizePathSeparators(node.path).replace(/\/+$/, "") : "")
+    .find(Boolean);
+  return firstNodePath ? getParentPath(firstNodePath) : "";
+}
+
+function getAncestorDirectoryPaths(pathValue: string) {
+  const normalized = normalizePathSeparators(pathValue).replace(/\/+$/, "");
+  if (!normalized) return [];
+
+  const parts = normalized.split("/");
+  const ancestors: string[] = [];
+  for (let index = 0; index < parts.length; index += 1) {
+    const part = parts[index];
+    if (!part) continue;
+    if (index === 0 && /^[A-Za-z]:$/.test(part)) continue;
+    ancestors.push(parts.slice(0, index + 1).join("/"));
+  }
+  return ancestors;
+}
+
+function getDirectoryQueryName(directive: string) {
+  if (extractExplicitDirectoryPath(directive)) return "";
+  const patterns = [
+    /\bwhat\s+folders?\s+(?:are\s+)?(?:found\s+)?(?:in|inside|under)\s+(?:the\s+)?(.+?)(?:\s+folder)?[?.!]*$/i,
+    /\bfolders?\s+(?:are\s+)?(?:found\s+)?(?:in|inside|under)\s+(?:the\s+)?(.+?)(?:\s+folder)?[?.!]*$/i,
+    /\bwhat\s+about\s+(?:the\s+)?folders?\s+(?:in|inside|under)\s+(?:the\s+)?(.+?)(?:\s+folder)?[?.!]*$/i,
+    /\bwhat\s+(?:about|avout)\s+(?:the\s+)?(.+?)(?:\s+folder)?[?.!]*$/i,
+  ];
+
+  for (const pattern of patterns) {
+    const match = directive.match(pattern);
+    if (!match?.[1]) continue;
+    const value = match[1]
+      .replace(/\bnexus\s+root\b/ig, "")
+      .replace(/\bcurrent\s+(?:recursive\s+mirror|mirror|root)\b/ig, "")
+      .replace(/\bfolders?\b/ig, "")
+      .replace(/\bfolder\b/ig, "")
+      .replace(/\bthe\b/ig, "")
+      .replace(/\bthink\s+about\s+it\b/ig, "")
+      .trim();
+    if (value) return value;
+  }
+
+  return "";
+}
+
+function findDirectoryPathByQuery(query: string, fileTree: unknown, workingDirectory = "") {
+  const currentRoot = getCurrentTreeRootPath(fileTree, workingDirectory);
+  const nodes = flattenFileTree(fileTree);
+  const folderNodes = nodes.filter((node) => isFolderNode(node) && typeof node.path === "string");
+
+  if (currentRoot && folderNameMatchesQuery(getFileName(currentRoot), query)) {
+    return currentRoot;
+  }
+
+  const ancestorMatch = getAncestorDirectoryPaths(currentRoot)
+    .reverse()
+    .find((ancestorPath) => folderNameMatchesQuery(getFileName(ancestorPath), query));
+  if (ancestorMatch) return ancestorMatch;
+
+  const treeMatch = folderNodes.find((node) => {
+    const folderName = String(node.name || getFileName(node.path!));
+    return folderNameMatchesQuery(folderName, query);
+  });
+  return treeMatch?.path ? normalizePathSeparators(treeMatch.path) : "";
+}
+
 function getFolderNode(nodes: FileTreeNode[], folderName: string) {
-  return nodes.find((node) => isFolderNode(node) && String(node.name || "").toLowerCase() === folderName.toLowerCase());
+  return nodes.find((node) => isFolderNode(node) && folderNameMatchesQuery(String(node.name || ""), folderName));
 }
 
 function shouldUseHistoryFolderContext(directive: string) {
@@ -430,12 +597,18 @@ function wantsFolderInventory(directive: string, history: ChatMessage[]) {
 
   const folderNames = getRelevantFolderNames(directive, history);
   const asksFolderQuestion = /\b(can you see|see|visible|exists?|is there|find|what files|which files|list|files are|inside|there|ther)\b/.test(text);
+  const asksWhatsInFolder = /\bwhat(?:'s| is|s)?\s+in\b/.test(text) || /\bwhats\s+in\b/.test(text);
   const correctionToListFiles = /\bshould have said\b.*\bfiles\b|\bwhat files are (?:there|ther)\b/.test(text);
 
-  return folderNames.length > 0 && (asksFolderQuestion || correctionToListFiles);
+  return folderNames.length > 0 && (asksFolderQuestion || asksWhatsInFolder || correctionToListFiles);
 }
 
-function buildFolderInventoryResponse(directive: string, history: ChatMessage[], fileTree: unknown) {
+function buildFolderInventoryResponse(
+  directive: string,
+  history: ChatMessage[],
+  fileTree: unknown,
+  redactor = redactSensitiveContent,
+) {
   const nodes = flattenFileTree(fileTree);
   const folderNames = getRelevantFolderNames(directive, history);
   const requestedName = folderNames[0];
@@ -448,7 +621,7 @@ function buildFolderInventoryResponse(directive: string, history: ChatMessage[],
 
   const displayName = folder.name || requestedName;
   const wantsPath = /\b(path|where|location|located)\b/i.test(directive);
-  const pathLine = wantsPath && folder.path ? `\nPath: ${redactSensitiveContent(normalizePathSeparators(folder.path))}` : "";
+  const pathLine = wantsPath && folder.path ? `\nPath: ${redactor(normalizePathSeparators(folder.path))}` : "";
   const children = Array.isArray(folder.children) ? folder.children : [];
   const childFiles = children
     .filter((child) => isFileNode(child))
@@ -477,6 +650,303 @@ function buildFolderInventoryResponse(directive: string, history: ChatMessage[],
     : "";
 
   return `Yes, I can see the ${displayName} folder.${pathLine}\nFiles:\n${fileLines}${folderLines}`;
+}
+
+function wantsWorkspaceInventory(directive: string) {
+  const text = directive.toLowerCase();
+  if (wantsEditDirective(directive) || wantsDeleteDirective(directive) || wantsExplicitOpen(directive)) return false;
+  if (/\b(read|content|contents|code\s*word|codeword)\b/i.test(directive)) return false;
+  return /\bwhat\b[\s\S]*\b(files?|folders?)\b[\s\S]*\b(can you|you can|do you)\b[\s\S]*\b(se+|see|view)\b/i.test(text)
+    || /\bwhat\b[\s\S]*\b(can you|do you)\b[\s\S]*\b(se+|see|view)\b[\s\S]*\b(files?|folders?)\b/i.test(text)
+    || /\blist\b[\s\S]*\b(files?|folders?)\b[\s\S]*\b(workspace|root|here)\b/i.test(text)
+    || /\bwhat\b[\s\S]*\bfolder\s+names?\b[\s\S]*\b(recursive|resursive|mirror|memory|memeory)\b/i.test(text)
+    || /\bfolders?\b[\s\S]*\b(recursive|resursive)\b[\s\S]*\b(memory|memeory|mirror)\b/i.test(text);
+}
+
+function buildWorkspaceInventoryResponse(fileTree: unknown) {
+  const nodes = Array.isArray(fileTree) ? fileTree as FileTreeNode[] : [];
+  if (nodes.length === 0) return "I do not have a visible workspace tree yet.";
+
+  const folders = nodes
+    .filter((node) => isFolderNode(node))
+    .map((node) => node.name || (node.path ? getFileName(node.path) : "unnamed folder"))
+    .filter(Boolean);
+  const files = nodes
+    .filter((node) => isFileNode(node))
+    .map((node) => node.name || (node.path ? getFileName(node.path) : "unnamed file"))
+    .filter(Boolean);
+
+  return [
+    "I can see these top-level folders and files:",
+    "",
+    "Folders:",
+    folders.length > 0 ? folders.map((name) => `- ${name}`).join("\n") : "- (none)",
+    "",
+    "Files:",
+    files.length > 0 ? files.map((name) => `- ${name}`).join("\n") : "- (none)",
+  ].join("\n");
+}
+
+function wantsFolderOnlyListing(directive: string, history: ChatMessage[] = []) {
+  const text = directive.toLowerCase();
+  if (wantsCurrentFolderQuestion(directive) || wantsDirectoryNavigation(directive)) return false;
+  if (wantsEditDirective(directive) || wantsDeleteDirective(directive) || wantsExplicitOpen(directive)) return false;
+  if (/\b(read|content|contents|code\s*word|codeword)\b/i.test(directive)) return false;
+  const previousFolderQuestion = history
+    .filter((message) => message.role === "user")
+    .slice(-4, -1)
+    .some((message) => /\bfolders?\b|\bdirector(?:y|ies)\b|\brecursive\s+(?:mirror|memory|memeory)\b/i.test(message.content));
+  return /\bwhat\b[\s\S]*\bfolders?\b[\s\S]*\b(here|there|in|inside|parent|path|root)\b/i.test(text)
+    || /\bfolder\s+names?\b/i.test(text)
+    || /\bfolders?\b[\s\S]*\bparent\b[\s\S]*\bnexus\s+root\b/i.test(text)
+    || /\b[A-Za-z]:[\\/]/.test(directive)
+    || (previousFolderQuestion && /\bwhat\s+(?:about|avout)\b/i.test(text));
+}
+
+function wantsCurrentFolderQuestion(directive: string) {
+  return /\bwhat\s+folder\b[\s\S]*\b(are\s+we|we\s+are|am\s+i|on|in|at)\b[\s\S]*\b(right now|currently|now|rn)\b/i.test(directive)
+    || /\bwhat\s+folder\s+are\s+we\s+(?:in|on|at)\b/i.test(directive)
+    || /\bwhere\b[\s\S]*\b(recursive\s+mirror|mirror|nexus\s+root|folder)\b[\s\S]*\b(now|currently|at)\b/i.test(directive);
+}
+
+function buildCurrentFolderResponse(fileTree: unknown, workingDirectory = "", redactor = redactSensitiveContent) {
+  const currentRoot = getCurrentTreeRootPath(fileTree, workingDirectory);
+  if (!currentRoot) return "I do not have a current Recursive Mirror folder path yet.";
+  return `The current Recursive Mirror folder is ${getFileName(currentRoot)}.\nPath: ${redactor(currentRoot)}`;
+}
+
+function extractExplicitDirectoryPath(directive: string) {
+  const match = directive.match(/[A-Za-z]:[\\/][^\r\n"'`]+/);
+  if (!match) return "";
+  return normalizePathSeparators(match[0])
+    .replace(/[?.!,;:)\]]+$/g, "")
+    .trim();
+}
+
+function extractTreePayload(response: any) {
+  return Array.isArray(response)
+    ? { tree: response as FileTreeNode[], path: "" }
+    : {
+        tree: response?.payload?.tree || response?.tree || response?.payload || [],
+        path: response?.payload?.path || response?.path || "",
+      };
+}
+
+function buildFolderOnlyResponse(tree: unknown, label = "current Recursive Mirror root") {
+  const nodes = Array.isArray(tree) ? tree as FileTreeNode[] : [];
+  const folders = nodes
+    .filter((node) => isFolderNode(node))
+    .map((node) => node.name || (node.path ? getFileName(node.path) : "unnamed folder"))
+    .filter(Boolean);
+
+  if (folders.length === 0) {
+    return `I do not see any direct folders in ${label}.`;
+  }
+
+  return `Folders in ${label}:\n${folders.map((folderName) => `- ${folderName}`).join("\n")}`;
+}
+
+function buildDirectorySetPathResponse(response: any, fallbackPath: string, redactor = redactSensitiveContent) {
+  const { tree, path } = extractTreePayload(response);
+  const targetPath = normalizePathSeparators(path || fallbackPath).replace(/\/+$/, "");
+  const folderName = getFileName(targetPath) || targetPath;
+  const folders = getDirectFolderNodes(tree)
+    .map((node) => node.name || (node.path ? getFileName(node.path) : "unnamed folder"))
+    .filter(Boolean);
+  const folderLines = folders.length > 0
+    ? `\nFolders:\n${folders.map((name) => `- ${name}`).join("\n")}`
+    : "\nFolders:\n- (none)";
+
+  return `Now in ${folderName}.\nPath: ${redactor(targetPath)}${folderLines}`;
+}
+
+function getDirectFolderNodes(fileTree: unknown) {
+  return getTopLevelTreeNodes(fileTree).filter((node) => isFolderNode(node));
+}
+
+function getOrdinalFolderIndex(directive: string) {
+  const normalized = directive.toLowerCase();
+  const numeric = normalized.match(/\b(\d{1,2})(?:st|nd|rd|th)?\s+folders?\b/);
+  if (numeric) return Number(numeric[1]) - 1;
+
+  const ordinals: Record<string, number> = {
+    first: 0,
+    second: 1,
+    secound: 1,
+    third: 2,
+    fourth: 3,
+    fifth: 4,
+    sixth: 5,
+    seventh: 6,
+    eighth: 7,
+    ninth: 8,
+    tenth: 9,
+  };
+
+  for (const [word, index] of Object.entries(ordinals)) {
+    if (new RegExp(`\\b${word}\\s+folders?\\b`).test(normalized)) return index;
+  }
+
+  return -1;
+}
+
+function getNavigationFolderQuery(directive: string) {
+  const patterns = [
+    /\b(?:go|move|navigate|jump|enter|open)\s+(?:into|in|to|inside)\s+(?:the\s+)?(.+?)(?:\s+folder)?[?.!]*$/i,
+    /\b(?:set|change)\s+(?:the\s+)?(?:recursive\s+mirror\s+)?(?:path|folder|directory)\s+(?:to|as)\s+(?:the\s+)?(.+?)(?:\s+folder)?[?.!]*$/i,
+  ];
+
+  for (const pattern of patterns) {
+    const match = directive.match(pattern);
+    const value = match?.[1]
+      ?.replace(/\b(?:first|second|secound|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|\d{1,2}(?:st|nd|rd|th)?)\s+folders?\b/ig, "")
+      .replace(/\bfolders?\b/ig, "")
+      .replace(/\bthe\b/ig, "")
+      .trim();
+    if (value) return value;
+  }
+
+  return "";
+}
+
+function wantsDirectoryNavigation(directive: string) {
+  const text = directive.toLowerCase();
+  if (wantsEditDirective(directive) || wantsDeleteDirective(directive)) return false;
+  return /\b(?:go|move|navigate|jump|enter|open)\s+(?:into|in|to|inside)\b[\s\S]*\bfolders?\b/i.test(directive)
+    || /\b(?:go|move|navigate|jump|take)\s+(?:us|use|me)?\s*back\b/i.test(directive)
+    || /\b(?:go|move|navigate|jump)\s+up\b/i.test(text)
+    || /\b(?:parent|previous)\s+folders?\b/i.test(directive)
+    || /\b(?:set|change)\s+(?:the\s+)?(?:recursive\s+mirror\s+)?(?:path|folder|directory)\s+(?:to|as)\b/i.test(directive);
+}
+
+function resolveDirectoryPathCandidate(pathValue: string, fileTree: unknown, workingDirectory = "") {
+  const normalized = normalizePathSeparators(pathValue).replace(/\/+$/, "");
+  if (!normalized) return "";
+  if (/^[A-Za-z]:\//.test(normalized) || normalized.startsWith("/")) return normalized;
+
+  const currentRoot = getCurrentTreeRootPath(fileTree, workingDirectory);
+  const directMatch = getDirectFolderNodes(fileTree).find((node) => {
+    const nodeName = String(node.name || (node.path ? getFileName(node.path) : ""));
+    return folderNameMatchesQuery(nodeName, normalized);
+  });
+  if (directMatch?.path) return normalizePathSeparators(directMatch.path);
+
+  const treeMatch = flattenFileTree(fileTree).find((node) => {
+    if (!isFolderNode(node) || typeof node.path !== "string") return false;
+    const nodeName = String(node.name || getFileName(node.path));
+    return folderNameMatchesQuery(nodeName, normalized);
+  });
+  if (treeMatch?.path) return normalizePathSeparators(treeMatch.path);
+
+  return currentRoot ? `${currentRoot}/${normalized}` : normalized;
+}
+
+function getDirectoryNavigationTarget(directive: string, fileTree: unknown, workingDirectory = "") {
+  const currentRoot = getCurrentTreeRootPath(fileTree, workingDirectory);
+  const text = directive.toLowerCase();
+  const wantsParent = /\b(?:go|move|navigate|jump|take)\s+(?:us|use|me)?\s*back\b/i.test(directive)
+    || /\b(?:go|move|navigate|jump)\s+up\b/i.test(text)
+    || /\b(?:parent|previous)\s+folders?\b/i.test(directive);
+  if (wantsParent) return currentRoot ? getParentPath(currentRoot) : "";
+
+  const ordinalIndex = getOrdinalFolderIndex(directive);
+  if (ordinalIndex >= 0) {
+    const folder = getDirectFolderNodes(fileTree)[ordinalIndex];
+    return folder?.path ? normalizePathSeparators(folder.path) : "";
+  }
+
+  const query = getNavigationFolderQuery(directive);
+  return query ? resolveDirectoryPathCandidate(query, fileTree, workingDirectory) : "";
+}
+
+function getDirectoryContextLines(fileTree: unknown, currentRoot: string, workingDirectory = "") {
+  const topLevelFolders = getTopLevelTreeNodes(fileTree)
+    .filter((node) => isFolderNode(node))
+    .map((node) => {
+      const name = node.name || (node.path ? getFileName(node.path) : "unnamed folder");
+      const path = node.path ? ` => ${normalizePathSeparators(node.path)}` : "";
+      return `- ${name}${path}`;
+    });
+  const visibleFolders = flattenFileTree(fileTree)
+    .filter((node) => isFolderNode(node) && typeof node.path === "string")
+    .slice(0, 80)
+    .map((node) => `- ${node.name || getFileName(node.path!)} => ${normalizePathSeparators(node.path!)}`);
+  const ancestors = getAncestorDirectoryPaths(currentRoot || workingDirectory)
+    .map((ancestor) => `- ${getFileName(ancestor)} => ${ancestor}`);
+
+  return [
+    `CURRENT_RECURSIVE_MIRROR_ROOT: ${currentRoot || "unknown"}`,
+    `CURRENT_WORKING_DIRECTORY: ${workingDirectory || "unknown"}`,
+    "CURRENT_PATH_ANCESTORS:",
+    ancestors.length > 0 ? ancestors.join("\n") : "- none",
+    "DIRECT_VISIBLE_FOLDERS:",
+    topLevelFolders.length > 0 ? topLevelFolders.join("\n") : "- none",
+    "VISIBLE_FOLDER_INDEX:",
+    visibleFolders.length > 0 ? visibleFolders.join("\n") : "- none",
+  ].join("\n");
+}
+
+function buildDirectoryResolverPrompt({
+  directive,
+  fileTree,
+  currentRoot,
+  workingDirectory,
+}: {
+  directive: string;
+  fileTree: unknown;
+  currentRoot: string;
+  workingDirectory: string;
+}) {
+  return `SYSTEM_FEEDBACK: DIRECTORY_LIST_RESOLVE
+Resolve the user's natural-language folder question into one real directory path.
+
+RULES:
+- Return pure JSON only.
+- Use command SET_PATH with payload.path set to the exact directory to list.
+- Never use READ_FILE, WRITE_FILE, DELETE_FILE, or RENAME_FILE for this resolver.
+- The local router will list direct child folders after you resolve the target.
+- If the user says "here", "current folder", "recursive mirror root", or gives no target, use CURRENT_RECURSIVE_MIRROR_ROOT.
+- If the user asks for a parent or ancestor folder by name, use CURRENT_PATH_ANCESTORS. For example, if CURRENT_RECURSIVE_MIRROR_ROOT is C:/Users/USERNAME/Documents/Unidex File, then "Documents" means C:/Users/USERNAME/Documents and "Unidex File" means C:/Users/USERNAME/Documents/Unidex File.
+- If the user gives an absolute path, use that path.
+- If the target cannot be resolved, use CURRENT_RECURSIVE_MIRROR_ROOT and explain uncertainty in message.
+
+${getDirectoryContextLines(fileTree, currentRoot, workingDirectory)}
+
+USER_DIRECTIVE:
+"""
+${directive}
+"""
+
+Response format:
+{"thought":"resolved directory target","command":"SET_PATH","payload":{"path":"C:/..."}, "message":"Listing folders in ..."}`
+}
+
+function getPayloadString(payload: Record<string, any>, keys: string[]) {
+  for (const key of keys) {
+    const value = payload[key];
+    if (typeof value === "string" && value.trim()) return normalizePathSeparators(value.trim());
+  }
+  return "";
+}
+
+function getDirectoryPathFromCommandResult(result: { command: string; payload?: Record<string, any> }) {
+  const payload = result.payload || {};
+  return getPayloadString(payload, ["path", "directory", "folder", "targetPath", "target", "cwd", "workingDirectory"]);
+}
+
+function getFallbackDirectoryTarget(input: string, fileTree: unknown, workingDirectory = "") {
+  const explicitPath = extractExplicitDirectoryPath(input);
+  const asksParentOfNexusRoot = /\bparent\b[\s\S]*\bnexus\s+root\b/i.test(input);
+  const currentRoot = getCurrentTreeRootPath(fileTree, workingDirectory);
+  const requestedDirectoryName = getDirectoryQueryName(input);
+  const resolvedDirectoryPath = requestedDirectoryName
+    ? findDirectoryPathByQuery(requestedDirectoryName, fileTree, workingDirectory)
+    : "";
+
+  return explicitPath
+    || (asksParentOfNexusRoot && currentRoot ? getParentPath(currentRoot) : "")
+    || resolvedDirectoryPath
+    || currentRoot;
 }
 
 function resolveFilePathCandidate(pathValue: string, directive: string, history: ChatMessage[], fileTree: unknown, workingDirectory = "") {
@@ -645,6 +1115,46 @@ function getDeleteFilePath(payload: Record<string, any>, fallbackPath = "") {
   return firstPayloadString(payload.path, payload.file_path, payload.filePath, payload.filepath, fallbackPath);
 }
 
+function getRenameFromPath(payload: Record<string, any>, fallbackPath = "") {
+  return firstPayloadString(payload.fromPath, payload.from_path, payload.sourcePath, payload.source, payload.oldPath, payload.old_path, fallbackPath);
+}
+
+function getRenameToPath(payload: Record<string, any>) {
+  return firstPayloadString(payload.toPath, payload.to_path, payload.targetPath, payload.destination, payload.newPath, payload.new_path);
+}
+
+function wantsRenameFileDirective(directive: string) {
+  const text = directive.toLowerCase();
+  if (/\b(copy|duplicate|clone)\b/.test(text)) return false;
+  return /\brename\b[\s\S]*\b(file|txt|text|name|to)\b/.test(text)
+    || /\bchange\b[\s\S]*\bfile\s+name\b[\s\S]*\bto\b/.test(text)
+    || /\bchange\b[\s\S]*\bname\b[\s\S]*\bof\b[\s\S]*\b(file|txt|text)\b[\s\S]*\bto\b/.test(text);
+}
+
+function getRenameDestinationName(directive: string) {
+  const patterns = [
+    /\b(?:rename|change)\b[\s\S]*?\b(?:file\s+)?name\b[\s\S]*?\b(?:to|as)\s+["'`]?([^\s"'`]+)["'`]?/i,
+    /\brename\b[\s\S]*?\bto\s+["'`]?([^\s"'`]+)["'`]?/i,
+  ];
+
+  for (const pattern of patterns) {
+    const value = cleanReplacementTerm(directive.match(pattern)?.[1] || "");
+    if (value) return value.replace(/[.,!?]+$/, "");
+  }
+  return "";
+}
+
+function buildSiblingRenamePath(sourcePath: string, destinationName: string) {
+  const normalizedSource = normalizePathSeparators(sourcePath).replace(/\/+$/, "");
+  const normalizedDestination = normalizePathSeparators(destinationName).replace(/\/+$/, "");
+  if (!normalizedSource || !normalizedDestination || normalizedDestination === "." || normalizedDestination === "..") return "";
+  if (/^[a-zA-Z]:\//.test(normalizedDestination) || normalizedDestination.includes("/")) return normalizedDestination;
+
+  const segments = normalizedSource.split("/");
+  segments[segments.length - 1] = normalizedDestination;
+  return segments.join("/");
+}
+
 function getFirstUserQuestion(history: ChatMessage[]) {
   return history.find((message) => message.role === "user")?.content || "";
 }
@@ -654,19 +1164,23 @@ function buildSessionFirstQuestionResponse(firstQuestion: string) {
   return `The first thing you asked in this page session was:\n\n"${redactSensitiveContent(firstQuestion)}"`;
 }
 
-function buildFileWriteResponse(path: string, content: string, hadSnapshot: boolean) {
+function buildFileWriteResponse(path: string, content: string, hadSnapshot: boolean, redactor = redactSensitiveContent) {
   const rollback = hadSnapshot
     ? "Previous content is cached for this page session, so you can ask me to revert it before reload."
     : "This file did not have a readable previous state cached.";
-  return `Saved ${getFileName(path)}.\nPath: ${normalizePathSeparators(path)}\nBytes: ${content.length}\n${rollback}`;
+  return `Saved ${getFileName(path)}.\nPath: ${redactor(normalizePathSeparators(path))}\nBytes: ${content.length}\n${rollback}`;
 }
 
-function buildFileDeleteResponse(path: string) {
-  return `Deleted ${getFileName(path)}.\nPath: ${normalizePathSeparators(path)}\nPrevious content is cached for this page session when it was readable.`;
+function buildFileDeleteResponse(path: string, redactor = redactSensitiveContent) {
+  return `Deleted ${getFileName(path)}.\nPath: ${redactor(normalizePathSeparators(path))}\nPrevious content is cached for this page session when it was readable.`;
 }
 
-function buildDeleteConfirmationMessage(path: string) {
-  return `Deletion requires confirmation.\n\nTarget: ${normalizePathSeparators(path)}\n\nApprove this dialog to delete it, or cancel to leave the file untouched.`;
+function buildFileRenameResponse(fromPath: string, toPath: string, redactor = redactSensitiveContent) {
+  return `Renamed ${getFileName(fromPath)} to ${getFileName(toPath)}.\nFrom: ${redactor(normalizePathSeparators(fromPath))}\nTo: ${redactor(normalizePathSeparators(toPath))}`;
+}
+
+function buildDeleteConfirmationMessage(path: string, redactor = redactSensitiveContent) {
+  return `Deletion requires confirmation.\n\nTarget: ${redactor(normalizePathSeparators(path))}\n\nApprove this dialog to delete it, or cancel to leave the file untouched.`;
 }
 
 function normalizeFileWriteContent(content: string) {
@@ -784,14 +1298,27 @@ function wantsAiAssistedFileEdit(directive: string) {
   if (wantsFirstLineOnlyEdit(directive)) return false;
 
   const asksForGeneratedContent = /\b(add|append|insert|include|put|write|generate)\b/.test(text)
-    && /\b(names?|examples?|shows?|movies?|lines?|below|above|after|before|list|some|few)\b/.test(text);
+    && /\b(names?|examples?|shows?|movies?|lines?|below|above|after|before|list|some|few|quotes?|quotas?|emojis?|equations?)\b/.test(text);
   const rewritesWholeFile = /\b(change|replace|rewrite|make|turn)\b/.test(text)
-    && /\b(whole file|entire file|file to be|bunch of|set of|list of|math|equations?|emojis?)\b/.test(text);
+    && /\b(whole file|entire file|file to be|bunch of|set of|list of|math|equations?|emojis?|quotes?|quotas?)\b/.test(text);
   const compoundEdit = /\band\b[\s\S]*\b(add|append|insert|include|put|write|generate|remove|delete|clear|trim)\b/.test(text);
   const positionalEdit = /\b(lines?|below|above|after|before)\b/.test(text);
   const qualitativeRewrite = /\b(more complex|harder|less simple|advanced|simpler|cleaner|better)\b/.test(text);
 
   return asksForGeneratedContent || rewritesWholeFile || compoundEdit || positionalEdit || qualitativeRewrite;
+}
+
+function wantsContextualGeneratedEditFollowup(directive: string, recentUserIntents: string[], hasCurrentTarget: boolean) {
+  if (!hasCurrentTarget || wantsFirstLineOnlyEdit(directive)) return false;
+  const text = directive.toLowerCase();
+  const recentText = recentUserIntents.slice(-6).join("\n").toLowerCase();
+  const priorGeneratedEdit = /\b(whole file|bunch of|batch|emojis?|quotes?|quotas?|equations?|math|random)\b/.test(recentText);
+  const currentMentionsGeneratedContent = /\b(emojis?|quotes?|quotas?|equations?|math|random)\b/.test(text);
+  const contextualFollowup = /\b(new|another|fresh|different|more)\b[\s\S]*\b(batch|set|ones|one|list)\b/.test(text)
+    || /\bat\s+least\s+\d+\b/.test(text)
+    || /\bminimum\s+of\s+\d+\b/.test(text);
+
+  return (currentMentionsGeneratedContent || contextualFollowup) && (priorGeneratedEdit || currentMentionsGeneratedContent);
 }
 
 function isRateLimitedBridgeMessage(message: string) {
@@ -803,61 +1330,6 @@ function isRecoverableBridgeMessage(message: string) {
     || /Bridge Offline|Invalid JSON|Empty response|non-JSON|No parseable JSON/i.test(message);
 }
 
-function getRequestedMinimumCount(directive: string, fallback = 10) {
-  const digitMatch = directive.match(/\b(?:at least|minimum of|around|about)?\s*(\d{1,2})\b/i);
-  if (digitMatch) return Math.max(1, Math.min(30, Number(digitMatch[1])));
-  return fallback;
-}
-
-function buildComplexMathEquations(count = 10) {
-  const equations = [
-    "2x + 7 = 19 -> x = 6",
-    "3a^2 - 12 = 63 -> a = 5 or a = -5",
-    "sqrt(144) + 5^2 = 37",
-    "(8! / 6!) + 11 = 67",
-    "log10(1000) + 4^3 = 67",
-    "sin(30 deg) + cos(60 deg) = 1",
-    "15% of 240 + 7^2 = 85",
-    "(3x - 4)(x + 2) = 0 -> x = 4/3 or x = -2",
-    "d/dx (4x^3 - 2x^2 + 9) = 12x^2 - 4x",
-    "integral 6x dx from 0 to 3 = 27",
-    "2^(n + 1) = 64 -> n = 5",
-    "(5 + 3i)(2 - i) = 13 + i",
-    "det([[2, 3], [4, 7]]) = 2",
-    "sum k=1..5 of k^2 = 55",
-    "x^2 - 10x + 25 = 0 -> x = 5",
-  ];
-  return equations.slice(0, Math.max(1, Math.min(count, equations.length))).join("\n");
-}
-
-function buildLocalAiEditFallback(directive: string, currentContent: string) {
-  const text = directive.toLowerCase();
-  const count = getRequestedMinimumCount(directive, 10);
-
-  if (/\b(math|equations?|algebra|calculus)\b/.test(text)) {
-    return {
-      content: buildComplexMathEquations(count),
-      description: "Applied local fallback math-equation generation because the AI bridge was rate-limited.",
-    };
-  }
-
-  if (/\bmore complex|harder|less simple|advanced\b/.test(text) && /[=+\-*/^√]|sqrt|log|sin|cos|integral/i.test(currentContent)) {
-    return {
-      content: buildComplexMathEquations(Math.max(count, 10)),
-      description: "Replaced the current simple equations with a more complex local fallback set because the AI bridge was rate-limited.",
-    };
-  }
-
-  if (/\bemojis?\b/.test(text)) {
-    return {
-      content: "✨ 🌌 🔥 🎮 ⚡ 🧠 💾 🚀 🎭 🌙",
-      description: "Applied local fallback emoji generation because the AI bridge was rate-limited.",
-    };
-  }
-
-  return null;
-}
-
 function buildFirstLineOnlyEdit(directive: string, content: string): LocalTextEdit | null {
   if (!wantsFirstLineOnlyEdit(directive)) return null;
 
@@ -867,6 +1339,7 @@ function buildFirstLineOnlyEdit(directive: string, content: string): LocalTextEd
   const codewordLine = wantsCodewordLine
     ? lines.find((line) => /^\s*code\s*word\s*[:=-]/i.test(line))
     : undefined;
+  if (wantsCodewordLine && !codewordLine) return null;
   const keptLine = codewordLine ?? lines[0] ?? "";
 
   return {
@@ -888,24 +1361,58 @@ function getLabeledCodeword(content: string) {
   return labeled ? stripFileContentWrapper(labeled[1]).replace(/^["']|["']$/g, "") : "";
 }
 
-function buildFileReadResponse(directive: string, path: string, content: string, openedInspector: boolean, shouldRedact = false) {
+function stripInvisibleContent(content: string) {
+  return normalizeFileWriteContent(stripFileContentWrapper(content))
+    .replace(/[\s\u200B-\u200D\u2060\uFEFF\uFE0E\uFE0F]/g, "");
+}
+
+function getRequestedMinimumCount(directive: string) {
+  const match = directive.match(/\b(?:at least|minimum of)\s+(\d{1,3})\b/i);
+  return match ? Math.max(1, Math.min(200, Number(match[1]))) : 0;
+}
+
+function getInvalidAiGeneratedContentReason(directive: string, content: string) {
+  if (!/\b(emojis?|symbols?|characters?)\b/i.test(directive)) return "";
+  const visibleContent = stripInvisibleContent(content);
+  if (visibleContent.length === 0) {
+    return "The selected AI model returned blank or invisible generated content, so I left the file unchanged.";
+  }
+  if (/[A-Za-z0-9]/.test(visibleContent)) {
+    return "The selected AI model returned non-emoji text for an emoji-only request, so I left the file unchanged.";
+  }
+  const requestedMinimum = getRequestedMinimumCount(directive);
+  if (requestedMinimum > 0 && Array.from(visibleContent).length < requestedMinimum) {
+    return `The selected AI model returned fewer visible emoji than requested (${requestedMinimum}), so I left the file unchanged.`;
+  }
+  return "";
+}
+
+function buildFileReadResponse(
+  directive: string,
+  path: string,
+  content: string,
+  openedInspector: boolean,
+  shouldRedact = false,
+  redactor = redactSensitiveContent,
+) {
   const fileName = getFileName(path);
-  const displayPath = normalizePathSeparators(path);
+  const displayPath = redactor(normalizePathSeparators(path));
   const cleaned = normalizeFileWriteContent(stripFileContentWrapper(content));
+  const safeCleaned = redactor(cleaned);
 
   if (openedInspector && !shouldRedact) {
     return `Opened ${fileName} in Remote_Inspector.\nPath: ${displayPath}`;
   }
 
   if (shouldRedact) {
-    return `I read ${fileName}. Redacted important information:\n\n${redactSensitiveContent(cleaned) || "(empty file)"}`;
+    return `I read ${fileName}. Redacted important information:\n\n${safeCleaned || "(empty file)"}`;
   }
 
   if (isCodewordDirective(directive)) {
     return `The codeword in ${fileName} is: ${extractCodeword(content)}.`;
   }
 
-  return `I read ${fileName}. It says:\n\n${cleaned || "(empty file)"}`;
+  return `I read ${fileName}. It says:\n\n${safeCleaned || "(empty file)"}`;
 }
 
 function isEmptyBridgeResponse(message: string) {
@@ -925,6 +1432,7 @@ export function NeuralCommand() {
   const fileEditCacheRef = useRef<Map<string, FileEditSnapshot>>(new Map());
   const lastMutationPathRef = useRef<string | null>(null);
   const codewordHistoryRef = useRef<string[]>([]);
+  const revealLocalUserPathsRef = useRef(false);
   const sessionMemoryRef = useRef<SessionMemory>({
     recentFiles: [],
     recentUserIntents: [],
@@ -954,6 +1462,9 @@ export function NeuralCommand() {
     setMessages([...nextHistory]);
     return nextHistory;
   };
+
+  const displaySensitiveText = (value: string) =>
+    revealLocalUserPathsRef.current ? redactHighConfidenceSecrets(value) : redactSensitiveContent(value);
 
   const trackCodewordValue = (value: string) => {
     const cleaned = cleanCodewordValue(value);
@@ -996,7 +1507,7 @@ export function NeuralCommand() {
       `Last read file: ${memory.lastReadPath || "None"}`,
       `Last written file: ${memory.lastWritePath || "None"}`,
       `Recent files: ${memory.recentFiles.length > 0 ? memory.recentFiles.join(" | ") : "None"}`,
-      `Recent user intents: ${memory.recentUserIntents.length > 0 ? memory.recentUserIntents.join(" | ") : "None"}`,
+      `Recent user intents: ${memory.recentUserIntents.length > 0 ? memory.recentUserIntents.map(redactSensitiveContent).join(" | ") : "None"}`,
       `File events: ${memory.fileEvents.length > 0 ? memory.fileEvents.join(" | ") : "None"}`,
       `Last file preview:\n"""${memory.lastFilePreview || "None"}"""`,
     ].join("\n");
@@ -1006,7 +1517,7 @@ export function NeuralCommand() {
     { role: "model" as const, content: buildSessionMemoryText() },
     ...history.slice(-limit).map((message) => ({
       role: message.role,
-      content: message.content,
+      content: redactSensitiveContent(message.content),
     })),
   ];
 
@@ -1014,6 +1525,56 @@ export function NeuralCommand() {
     const values = codewordHistoryRef.current;
     if (values.length === 0) return "I have not tracked any codeword values in this page session yet.";
     return `We have gone through ${values.length} codeword ${values.length === 1 ? "value" : "values"} this page session:\n\n${values.map((value, index) => `${index + 1}. ${value}`).join("\n")}`;
+  };
+
+  const getUserMessages = (history: ChatMessage[], includeCurrent = true) => {
+    const userMessages = history.filter((message) => message.role === "user");
+    return includeCurrent ? userMessages : userMessages.slice(0, -1);
+  };
+
+  const buildSessionMessageCountResponse = (history: ChatMessage[]) => {
+    const userMessages = getUserMessages(history);
+    return [
+      `You have sent ${userMessages.length} user ${userMessages.length === 1 ? "message" : "messages"} in this page session.`,
+      "",
+      ...userMessages.map((message, index) => `${index + 1}. "${redactSensitiveContent(message.content)}"`),
+    ].join("\n");
+  };
+
+  const buildSessionEditRequestRecallResponse = (history: ChatMessage[]) => {
+    const previousUserMessages = getUserMessages(history, false);
+    const editRequest = [...previousUserMessages].reverse().find((message) =>
+      wantsEditDirective(message.content)
+      && !wantsRevertDirective(message.content)
+      && /\b(file|txt|text|content|code\s*word|codeword|whole file)\b/i.test(message.content)
+    );
+
+    if (!editRequest) return "I do not see an earlier file-edit request in this page session.";
+    return `Your file-edit request was:\n\n"${redactSensitiveContent(editRequest.content)}"`;
+  };
+
+  const buildSessionActionSummaryResponse = (history: ChatMessage[]) => {
+    const previousUserMessages = getUserMessages(history, false);
+    if (previousUserMessages.length === 0) return "I do not have earlier user actions in this page session yet.";
+
+    const actionLines = previousUserMessages
+      .filter((message) => {
+        const content = message.content;
+        return wantsFolderInventory(content, history)
+          || wantsLocalFileReadRequest(content, history)
+          || wantsEditDirective(content)
+          || wantsRevertDirective(content)
+          || wantsSessionFirstQuestion(content)
+          || wantsSessionEditRequestRecall(content)
+          || wantsSessionMessageCount(content);
+      })
+      .map((message, index) => `${index + 1}. "${redactSensitiveContent(message.content)}"`);
+
+    if (actionLines.length === 0) {
+      return "I have the chatlog, but I do not see earlier tool/session actions in this page session.";
+    }
+
+    return `Here are the action-style requests I have from this page session:\n\n${actionLines.join("\n")}`;
   };
 
   const resolveCommandPath = (
@@ -1069,6 +1630,20 @@ export function NeuralCommand() {
     setLastAgentReadFile((prev) => prev?.path === path ? null : prev);
   };
 
+  const executeRenameFile = async (fromPath: string, toPath: string) => {
+    const snapshot = await cacheFileBeforeMutation(fromPath);
+    await nexus.renameFile(fromPath, toPath);
+    lastMutationPathRef.current = toPath;
+    if (snapshot.content !== null) {
+      setLastAgentReadFile({ path: toPath, content: snapshot.content });
+      rememberFileEvent("RENAME", toPath, snapshot.content);
+    } else {
+      setLastAgentReadFile((prev) => prev?.path === fromPath ? { ...prev, path: toPath } : prev);
+      rememberFileEvent("RENAME", toPath);
+    }
+    return snapshot;
+  };
+
   const handleRevertRequest = async (input: string, history: ChatMessage[]) => {
     const inferredPath = inferReadPathsFromContext(input, history, fileTree)[0];
     const cachedSnapshots = Array.from(fileEditCacheRef.current.values());
@@ -1091,23 +1666,23 @@ export function NeuralCommand() {
       setLastAgentReadFile({ path: snapshot.path, content: snapshot.content });
       return appendModelMessage(
         history,
-        `Restored ${getFileName(snapshot.path)} to its cached previous state.\nPath: ${normalizePathSeparators(snapshot.path)}`,
+        `Restored ${getFileName(snapshot.path)} to its cached previous state.\nPath: ${displaySensitiveText(normalizePathSeparators(snapshot.path))}`,
         "WRITE_FILE",
       );
     }
 
     if (wantsDeleteWithoutConfirmation(input)) {
       await executeDeleteFile(snapshot.path);
-      return appendModelMessage(history, buildFileDeleteResponse(snapshot.path), "DELETE_FILE");
+      return appendModelMessage(history, buildFileDeleteResponse(snapshot.path, displaySensitiveText), "DELETE_FILE");
     }
 
     setPendingDelete({
       path: snapshot.path,
-      message: `Reverting this session-created file requires deleting it.\n\nTarget: ${normalizePathSeparators(snapshot.path)}`,
+      message: `Reverting this session-created file requires deleting it.\n\nTarget: ${displaySensitiveText(normalizePathSeparators(snapshot.path))}`,
     });
     return appendModelMessage(
       history,
-      buildDeleteConfirmationMessage(snapshot.path),
+      buildDeleteConfirmationMessage(snapshot.path, displaySensitiveText),
       "DELETE_FILE",
     );
   };
@@ -1126,13 +1701,141 @@ export function NeuralCommand() {
     return fallbackPath ? resolveCommandPath(fallbackPath, input, history) : "";
   };
 
+  const resolveRenameSourcePath = (input: string, history: ChatMessage[], destinationName: string) => {
+    const destinationLower = getFileName(destinationName).toLowerCase();
+    const explicitSourceName = getExplicitFileNames(input).find((name) => name !== destinationLower);
+    if (explicitSourceName) {
+      const nodes = flattenFileTree(fileTree);
+      const match = nodes.find((node) => {
+        if (!isFileNode(node) || typeof node.path !== "string") return false;
+        const nodeName = String(node.name || getFileName(node.path)).toLowerCase();
+        return nodeName === explicitSourceName;
+      });
+      if (match?.path) return resolveCommandPath(match.path, input, history);
+    }
+
+    const fallbackPath = lastAgentReadFile?.path
+      || fileContent?.path
+      || sessionMemoryRef.current.lastTargetPath
+      || sessionMemoryRef.current.lastReadPath
+      || sessionMemoryRef.current.lastWritePath
+      || "";
+
+    return fallbackPath ? resolveCommandPath(fallbackPath, input, history) : "";
+  };
+
+  const handleRenameFileRequest = async (input: string, history: ChatMessage[]) => {
+    const destinationName = getRenameDestinationName(input);
+    if (!destinationName) {
+      return appendModelMessage(history, "I need the new file name before I can rename it.");
+    }
+
+    const fromPath = resolveRenameSourcePath(input, history, destinationName);
+    if (!fromPath) {
+      return appendModelMessage(history, "I need a current or explicitly named source file before I can rename it.");
+    }
+
+    const toPath = buildSiblingRenamePath(fromPath, destinationName);
+    if (!toPath) {
+      return appendModelMessage(history, "I could not build a valid destination path for that rename.");
+    }
+
+    if (normalizePathSeparators(fromPath).toLowerCase() === normalizePathSeparators(toPath).toLowerCase()) {
+      return appendModelMessage(history, `${getFileName(fromPath)} already has that name.`);
+    }
+
+    try {
+      await executeRenameFile(fromPath, toPath);
+      return appendModelMessage(history, buildFileRenameResponse(fromPath, toPath, displaySensitiveText), "RENAME_FILE");
+    } catch (error: any) {
+      const message = error.message || "Unknown error";
+      const alreadyExists = /409|already exists/i.test(message);
+      return appendModelMessage(
+        history,
+        alreadyExists
+          ? `I could not rename ${getFileName(fromPath)} to ${getFileName(toPath)} because the destination already exists. Choose another name, or delete/rename the existing ${getFileName(toPath)} first.`
+          : `Rename failed: ${message}`,
+        "RENAME_FILE",
+      );
+    }
+  };
+
+  const handleFolderOnlyListingRequest = async (input: string, history: ChatMessage[]) => {
+    const currentRoot = getCurrentTreeRootPath(fileTree, workingDirectory);
+    const fallbackPath = getFallbackDirectoryTarget(input, fileTree, workingDirectory);
+    let targetPath = "";
+
+    try {
+      const result = await nexusCommand({
+        prompt: buildDirectoryResolverPrompt({
+          directive: input,
+          fileTree,
+          currentRoot,
+          workingDirectory,
+        }),
+        history: getAiHistory(history, 18),
+        context: {
+          processes: [],
+          fileTree: fileTree || [],
+          systemHealth: systemHealth || {},
+          currentUrl: url,
+          workingDirectory: currentRoot || workingDirectory || "C:/",
+        },
+      });
+
+      if (result.command === "SET_PATH") {
+        targetPath = getDirectoryPathFromCommandResult(result);
+        addManualLog("AI_DIRECTORY_RESOLVER", targetPath || "No SET_PATH payload returned");
+      } else if (result.command === "READ_FILE") {
+        addManualLog("SECURITY", "Suppressed READ_FILE from directory resolver");
+      } else if (isRecoverableBridgeMessage(result.message)) {
+        addManualLog("AI_DIRECTORY_RESOLVER", result.message);
+      }
+    } catch (error: any) {
+      addManualLog("AI_DIRECTORY_RESOLVER", `Resolver fault: ${error.message || "Unknown error"}`);
+    }
+
+    targetPath = normalizePathSeparators(targetPath || fallbackPath).replace(/\/+$/, "");
+
+    if (targetPath) {
+      try {
+        const response = await nexus.sendCommand("SET_PATH", { path: targetPath, depth: 1 });
+        const { tree, path } = extractTreePayload(response);
+        const label = path ? displaySensitiveText(normalizePathSeparators(path)) : displaySensitiveText(targetPath);
+        return appendModelMessage(history, buildFolderOnlyResponse(tree, label));
+      } catch (error: any) {
+        return appendModelMessage(history, `I could not list folders there: ${error.message || "Unknown error"}`);
+      }
+    }
+
+    return appendModelMessage(history, buildFolderOnlyResponse(fileTree, "the current Recursive Mirror root"));
+  };
+
+  const handleDirectoryNavigationRequest = async (input: string, history: ChatMessage[]) => {
+    const targetPath = getDirectoryNavigationTarget(input, fileTree, workingDirectory);
+    if (!targetPath) {
+      return appendModelMessage(history, "I could not resolve the folder to navigate to.");
+    }
+
+    try {
+      const response = await nexus.sendCommand("SET_PATH", { path: targetPath, depth: 1 });
+      return appendModelMessage(
+        history,
+        buildDirectorySetPathResponse(response, targetPath, displaySensitiveText),
+        "SET_PATH",
+      );
+    } catch (error: any) {
+      return appendModelMessage(history, `I could not navigate there: ${error.message || "Unknown error"}`, "SET_PATH");
+    }
+  };
+
   const wantsLocalFileReadRequest = (input: string, history: ChatMessage[]) => {
-    if (wantsEditDirective(input) || wantsDeleteDirective(input) || wantsFolderInventory(input, history)) return false;
+    if (wantsEditDirective(input) || wantsDeleteDirective(input) || wantsFolderInventory(input, history) || wantsWorkspaceInventory(input) || wantsFolderOnlyListing(input, history)) return false;
     const text = input.toLowerCase();
-    const asksForFileContent = /\b(read|tell me|what.*say|what.*says|what.*in|content|contents)\b/.test(text)
+    const asksForFileContent = /\b(read|what.*say|what.*says|what.*in|content|contents)\b/.test(text)
       || /\bwhat(?:'s| is)?\s+in\b/.test(text)
       || wantsExplicitOpen(input);
-    const mentionsFile = getExplicitFileNames(input).length > 0 || /\b(it|that|file|current|now|after|updated)\b/.test(text);
+    const mentionsFile = hasFileReference(input) || /\b(that|current|now|after|updated)\b/.test(text);
     return asksForFileContent && mentionsFile;
   };
 
@@ -1155,7 +1858,7 @@ export function NeuralCommand() {
     rememberFileEvent("READ", targetPath, content);
     nextHistory = appendModelMessage(
       nextHistory,
-      buildFileReadResponse(input, targetPath, content, openInspector, shouldRedactRead),
+      buildFileReadResponse(input, targetPath, content, openInspector, shouldRedactRead, displaySensitiveText),
     );
     return nextHistory;
   };
@@ -1183,7 +1886,7 @@ export function NeuralCommand() {
     trackCodewordValue(codewordEdit.codeword);
     let nextHistory = appendModelMessage(
       history,
-      `Updated the codeword to "${codewordEdit.codeword}" in ${getFileName(targetPath)}.\n${buildFileWriteResponse(targetPath, codewordEdit.content, snapshot.existed)}`,
+      `Updated the codeword to "${codewordEdit.codeword}" in ${getFileName(targetPath)}.\n${buildFileWriteResponse(targetPath, codewordEdit.content, snapshot.existed, displaySensitiveText)}`,
       "WRITE_FILE",
     );
 
@@ -1192,7 +1895,7 @@ export function NeuralCommand() {
       if (codeword) trackCodewordValue(codeword);
       nextHistory = appendModelMessage(
         nextHistory,
-        buildFileReadResponse("read the file", targetPath, codewordEdit.content, false, shouldRedactForTurn(input, history)),
+        buildFileReadResponse("read the file", targetPath, codewordEdit.content, false, shouldRedactForTurn(input, history), displaySensitiveText),
       );
     }
 
@@ -1214,7 +1917,15 @@ export function NeuralCommand() {
     }
 
     const edit = buildFirstLineOnlyEdit(input, currentContent);
-    if (!edit) return null;
+    if (!edit) {
+      if (/\bcode\s*word\b|\bcodeword\b/i.test(input)) {
+        return appendModelMessage(
+          history,
+          `I did not find a Codeword line in ${getFileName(targetPath)}, so I left the file unchanged.`,
+        );
+      }
+      return null;
+    }
 
     const snapshot = await executeWriteFile(targetPath, edit.content);
     const codeword = getLabeledCodeword(edit.content);
@@ -1222,14 +1933,14 @@ export function NeuralCommand() {
 
     let nextHistory = appendModelMessage(
       history,
-      `${edit.description}\n${buildFileWriteResponse(targetPath, edit.content, snapshot.existed)}`,
+      `${edit.description}\n${buildFileWriteResponse(targetPath, edit.content, snapshot.existed, displaySensitiveText)}`,
       "WRITE_FILE",
     );
 
     if (wantsReadAfterMutation(input)) {
       nextHistory = appendModelMessage(
         nextHistory,
-        buildFileReadResponse("read the file", targetPath, edit.content, false, shouldRedactForTurn(input, history)),
+        buildFileReadResponse("read the file", targetPath, edit.content, false, shouldRedactForTurn(input, history), displaySensitiveText),
       );
     }
 
@@ -1238,6 +1949,7 @@ export function NeuralCommand() {
 
   const handleAiAssistedFileEditRequest = async (input: string, history: ChatMessage[]) => {
     const targetPath = resolveCurrentFileTarget(input, history);
+    const contextualDirective = `${sessionMemoryRef.current.recentUserIntents.slice(-6).join("\n")}\n${input}`;
     if (!targetPath) {
       return appendModelMessage(
         history,
@@ -1262,7 +1974,9 @@ USER_DIRECTIVE:
 ${input}
 """
 
-Produce the complete replacement content for TARGET_FILE. Return WRITE_FILE with payload.path exactly TARGET_FILE and payload.content containing the full new file content. Preserve any existing content the user did not ask to remove. Do not ask for another read. Do not open the inspector.`;
+Resolve short follow-up directives from HISTORY and SESSION_MEMORY. If the user asks for a new batch/set/ones, apply that to TARGET_FILE using the most recent generated-content request.
+Produce the complete replacement content for TARGET_FILE. Return WRITE_FILE with payload.path exactly TARGET_FILE and payload.content containing the full new file content. Preserve any existing content the user did not ask to remove. Do not ask for another read. Do not open the inspector.
+For emoji-only requests, payload.content must contain visible emoji only plus whitespace/newlines. Do not include words, URLs, provider names, punctuation labels, or hidden/invisible-only output. Honor requested counts such as "at least 50".`;
 
     const result = await nexusCommand({
       prompt: transformPrompt,
@@ -1279,24 +1993,10 @@ Produce the complete replacement content for TARGET_FILE. Return WRITE_FILE with
 
     const payload = result.payload || {};
     if (result.command !== "WRITE_FILE" && isRecoverableBridgeMessage(result.message)) {
-      const fallback = buildLocalAiEditFallback(input, currentContent);
-      if (fallback) {
-        const snapshot = await executeWriteFile(targetPath, fallback.content);
-        const codeword = getLabeledCodeword(fallback.content);
-        if (codeword) trackCodewordValue(codeword);
-        let nextHistory = appendModelMessage(
-          history,
-          `${fallback.description}\n${buildFileWriteResponse(targetPath, fallback.content, snapshot.existed)}`,
-          "WRITE_FILE",
-        );
-        if (wantsReadAfterMutation(input)) {
-          nextHistory = appendModelMessage(
-            nextHistory,
-            buildFileReadResponse("read the file", targetPath, fallback.content, false, shouldRedactForTurn(input, history)),
-          );
-        }
-        return nextHistory;
-      }
+      return appendModelMessage(
+        history,
+        `The AI bridge could not produce replacement content for ${getFileName(targetPath)} (${humanizeModelMessage(result.message, true, displaySensitiveText)}). I left the file unchanged.`,
+      );
     }
 
     if (result.command !== "WRITE_FILE" || !payloadHasWriteContent(payload)) {
@@ -1307,20 +2007,25 @@ Produce the complete replacement content for TARGET_FILE. Return WRITE_FILE with
     }
 
     const content = getWriteFileContent(payload);
+    const invalidGeneratedContentReason = getInvalidAiGeneratedContentReason(contextualDirective, content);
+    if (invalidGeneratedContentReason) {
+      return appendModelMessage(history, invalidGeneratedContentReason);
+    }
+
     const snapshot = await executeWriteFile(targetPath, content);
     const codeword = getLabeledCodeword(content);
     if (codeword) trackCodewordValue(codeword);
 
     let nextHistory = appendModelMessage(
       history,
-      `Applied the AI-assisted edit to ${getFileName(targetPath)}.\n${buildFileWriteResponse(targetPath, content, snapshot.existed)}`,
+      `Applied the AI-assisted edit to ${getFileName(targetPath)}.\n${buildFileWriteResponse(targetPath, content, snapshot.existed, displaySensitiveText)}`,
       "WRITE_FILE",
     );
 
     if (wantsReadAfterMutation(input)) {
       nextHistory = appendModelMessage(
         nextHistory,
-        buildFileReadResponse("read the file", targetPath, content, false, shouldRedactForTurn(input, history)),
+        buildFileReadResponse("read the file", targetPath, content, false, shouldRedactForTurn(input, history), displaySensitiveText),
       );
     }
 
@@ -1338,7 +2043,7 @@ Produce the complete replacement content for TARGET_FILE. Return WRITE_FILE with
         ...prev,
         {
           role: "model",
-          content: buildFileDeleteResponse(deletePath),
+          content: buildFileDeleteResponse(deletePath, displaySensitiveText),
           command: "DELETE_FILE",
           timestamp: Date.now(),
         },
@@ -1375,6 +2080,26 @@ Produce the complete replacement content for TARGET_FILE. Return WRITE_FILE with
       setMessages([...localHistory]);
     }
 
+    if (!isSilent && wantsLocalPathUnredaction(input)) {
+      revealLocalUserPathsRef.current = true;
+      const hasFollowupRequest = wantsCurrentFolderQuestion(input)
+        || wantsWorkspaceInventory(input)
+        || wantsFolderOnlyListing(input, localHistory)
+        || wantsFolderInventory(input, localHistory)
+        || wantsDirectoryNavigation(input)
+        || wantsLocalFileReadRequest(input, localHistory)
+        || wantsEditDirective(input)
+        || wantsDeleteDirective(input)
+        || wantsRenameFileDirective(input);
+      if (!hasFollowupRequest) {
+        appendModelMessage(
+          localHistory,
+          "Understood. I will show local user path names in this page session, while still redacting secrets.",
+        );
+        return;
+      }
+    }
+
     if (!isSilent && wantsSessionFirstQuestion(input)) {
       appendModelMessage(
         localHistory,
@@ -1393,6 +2118,29 @@ Produce the complete replacement content for TARGET_FILE. Return WRITE_FILE with
       return;
     }
 
+    if (!isSilent && wantsToolMisfireComplaint(input)) {
+      appendModelMessage(
+        localHistory,
+        "You're right. That should have stayed conversational/session-scoped and should not have touched file tools.",
+      );
+      return;
+    }
+
+    if (!isSilent && wantsSessionMessageCount(input)) {
+      appendModelMessage(localHistory, buildSessionMessageCountResponse(localHistory));
+      return;
+    }
+
+    if (!isSilent && wantsSessionEditRequestRecall(input)) {
+      appendModelMessage(localHistory, buildSessionEditRequestRecallResponse(localHistory));
+      return;
+    }
+
+    if (!isSilent && wantsSessionActionSummary(input)) {
+      appendModelMessage(localHistory, buildSessionActionSummaryResponse(localHistory));
+      return;
+    }
+
     if (!isSilent && wantsCodewordHistoryQuestion(input)) {
       appendModelMessage(localHistory, buildCodewordHistoryResponse());
       return;
@@ -1408,8 +2156,44 @@ Produce the complete replacement content for TARGET_FILE. Return WRITE_FILE with
       return;
     }
 
+    if (!isSilent && wantsCasualConversation(input)) {
+      appendModelMessage(localHistory, buildCasualResponse(input));
+      return;
+    }
+
+    if (!isSilent && wantsDirectoryNavigation(input)) {
+      setIsLoading(true);
+      try {
+        await handleDirectoryNavigationRequest(input, localHistory);
+      } finally {
+        setIsLoading(false);
+      }
+      return;
+    }
+
+    if (!isSilent && wantsCurrentFolderQuestion(input)) {
+      appendModelMessage(localHistory, buildCurrentFolderResponse(fileTree, workingDirectory, displaySensitiveText));
+      return;
+    }
+
+    if (!isSilent && wantsFolderOnlyListing(input, localHistory)) {
+      setIsLoading(true);
+      try {
+        await handleFolderOnlyListingRequest(input, localHistory);
+      } finally {
+        setIsLoading(false);
+      }
+      return;
+    }
+
+    if (!isSilent && wantsWorkspaceInventory(input)) {
+      addManualLog("FILESYSTEM_TREE", "Answered workspace inventory without reading file contents");
+      appendModelMessage(localHistory, buildWorkspaceInventoryResponse(fileTree));
+      return;
+    }
+
     if (!isSilent && wantsFolderInventory(input, localHistory)) {
-      const inventoryResponse = buildFolderInventoryResponse(input, localHistory, fileTree);
+      const inventoryResponse = buildFolderInventoryResponse(input, localHistory, fileTree, displaySensitiveText);
       if (inventoryResponse) {
         addManualLog("FILESYSTEM_TREE", `Answered folder inventory without reading file contents`);
         appendModelMessage(localHistory, inventoryResponse);
@@ -1426,6 +2210,24 @@ Produce the complete replacement content for TARGET_FILE. Return WRITE_FILE with
       return;
     }
 
+    if (!isSilent && wantsRenameFileDirective(input)) {
+      setIsLoading(true);
+      try {
+        await handleRenameFileRequest(input, localHistory);
+      } finally {
+        setIsLoading(false);
+      }
+      return;
+    }
+
+    const hasCurrentFileTarget = Boolean(
+      lastAgentReadFile?.path
+      || fileContent?.path
+      || sessionMemoryRef.current.lastTargetPath
+      || sessionMemoryRef.current.lastReadPath
+      || sessionMemoryRef.current.lastWritePath
+    );
+
     if (!isSilent && wantsFirstLineOnlyEdit(input)) {
       setIsLoading(true);
       try {
@@ -1441,7 +2243,7 @@ Produce the complete replacement content for TARGET_FILE. Return WRITE_FILE with
       }
     }
 
-    if (!isSilent && wantsAiAssistedFileEdit(input)) {
+    if (!isSilent && (wantsAiAssistedFileEdit(input) || wantsContextualGeneratedEditFollowup(input, sessionMemoryRef.current.recentUserIntents, hasCurrentFileTarget))) {
       setIsLoading(true);
       try {
         await handleAiAssistedFileEditRequest(input, localHistory);
@@ -1562,7 +2364,7 @@ Produce the complete replacement content for TARGET_FILE. Return WRITE_FILE with
         role: 'model',
         content: result.command === "READ_FILE"
           ? buildNeutralReadCommandMessage(result.payload || {})
-          : humanizeModelMessage(result.message, shouldRedactTurn),
+          : humanizeModelMessage(result.message, shouldRedactTurn, displaySensitiveText),
         command: result.command !== "NONE" ? result.command : undefined,
         timestamp: Date.now()
       };
@@ -1580,7 +2382,10 @@ Produce the complete replacement content for TARGET_FILE. Return WRITE_FILE with
       const allowSilentDelete = result.command === "DELETE_FILE"
         && wantsDeleteDirective(rootDirective)
         && readDepth < 4;
-      if (isSilent && result.command !== "NONE" && !allowSilentFollowupRead && !allowSilentWrite && !allowSilentDelete) {
+      const allowSilentRename = result.command === "RENAME_FILE"
+        && wantsRenameFileDirective(rootDirective)
+        && readDepth < 4;
+      if (isSilent && result.command !== "NONE" && !allowSilentFollowupRead && !allowSilentWrite && !allowSilentDelete && !allowSilentRename) {
         addManualLog("SECURITY", `Suppressed ${result.command} from file-derived AI context`);
         return;
       }
@@ -1619,7 +2424,7 @@ Produce the complete replacement content for TARGET_FILE. Return WRITE_FILE with
             rememberFileEvent("READ", readPath, content);
             const readResponse: ChatMessage = {
               role: 'model',
-              content: buildFileReadResponse(rootDirective, readPath, content, openInspector, shouldRedactTurn),
+              content: buildFileReadResponse(rootDirective, readPath, content, openInspector, shouldRedactTurn, displaySensitiveText),
               timestamp: Date.now()
             };
             localHistory = [...localHistory, readResponse];
@@ -1635,7 +2440,7 @@ Produce the complete replacement content for TARGET_FILE. Return WRITE_FILE with
               const snapshot = await executeWriteFile(lastReadSnapshot.path, codewordEdit.content);
               localHistory = appendModelMessage(
                 localHistory,
-                `Updated the codeword to "${codewordEdit.codeword}" in ${getFileName(lastReadSnapshot.path)}.\n${buildFileWriteResponse(lastReadSnapshot.path, codewordEdit.content, snapshot.existed)}`,
+                `Updated the codeword to "${codewordEdit.codeword}" in ${getFileName(lastReadSnapshot.path)}.\n${buildFileWriteResponse(lastReadSnapshot.path, codewordEdit.content, snapshot.existed, displaySensitiveText)}`,
                 "WRITE_FILE",
               );
               return;
@@ -1646,7 +2451,7 @@ Produce the complete replacement content for TARGET_FILE. Return WRITE_FILE with
               const snapshot = await executeWriteFile(lastReadSnapshot.path, simpleEdit.content);
               localHistory = appendModelMessage(
                 localHistory,
-                `Replaced "${simpleEdit.from}" with "${simpleEdit.to}" in ${getFileName(lastReadSnapshot.path)}.\n${buildFileWriteResponse(lastReadSnapshot.path, simpleEdit.content, snapshot.existed)}`,
+                `Replaced "${simpleEdit.from}" with "${simpleEdit.to}" in ${getFileName(lastReadSnapshot.path)}.\n${buildFileWriteResponse(lastReadSnapshot.path, simpleEdit.content, snapshot.existed, displaySensitiveText)}`,
                 "WRITE_FILE",
               );
               return;
@@ -1703,9 +2508,21 @@ Tell the user the file could not be read and include the failure reason.`,
           case "KILL_PROCESS":
             if (result.payload.pid) await nexus.sendCommand("KILL_PROCESS", { pid: result.payload.pid });
             break;
-          case "SET_PATH":
-            if (result.payload.path) await nexus.sendCommand("SET_PATH", { path: result.payload.path });
+          case "SET_PATH": {
+            const rawPath = getDirectoryPathFromCommandResult({ command: result.command, payload: result.payload || {} });
+            const targetPath = rawPath ? resolveDirectoryPathCandidate(rawPath, fileTree, workingDirectory) : "";
+            if (!targetPath) {
+              localHistory = appendModelMessage(localHistory, "I need a target folder before I can navigate.", "SET_PATH");
+              break;
+            }
+            const response = await nexus.sendCommand("SET_PATH", { path: targetPath, depth: 1 });
+            localHistory = appendModelMessage(
+              localHistory,
+              buildDirectorySetPathResponse(response, targetPath, displaySensitiveText),
+              "SET_PATH",
+            );
             break;
+          }
           case "WRITE_FILE": {
             const payload = result.payload || {};
             const rawPath = getWriteFilePath(payload, lastAgentReadFile?.path || fileContent?.path || "");
@@ -1736,8 +2553,8 @@ Tell the user the file could not be read and include the failure reason.`,
             localHistory = appendModelMessage(
               localHistory,
               codewordEdit
-                ? `Updated the codeword to "${codewordEdit.codeword}" in ${getFileName(writePath)}.\n${buildFileWriteResponse(writePath, content, snapshot.existed)}`
-                : buildFileWriteResponse(writePath, content, snapshot.existed),
+                ? `Updated the codeword to "${codewordEdit.codeword}" in ${getFileName(writePath)}.\n${buildFileWriteResponse(writePath, content, snapshot.existed, displaySensitiveText)}`
+                : buildFileWriteResponse(writePath, content, snapshot.existed, displaySensitiveText),
               "WRITE_FILE",
             );
             break;
@@ -1752,13 +2569,34 @@ Tell the user the file could not be read and include the failure reason.`,
             }
             if (wantsDeleteWithoutConfirmation(rootDirective)) {
               await executeDeleteFile(deletePath);
-              localHistory = appendModelMessage(localHistory, buildFileDeleteResponse(deletePath), "DELETE_FILE");
+              localHistory = appendModelMessage(localHistory, buildFileDeleteResponse(deletePath, displaySensitiveText), "DELETE_FILE");
             } else {
               setPendingDelete({
                 path: deletePath,
-                message: buildDeleteConfirmationMessage(deletePath),
+                message: buildDeleteConfirmationMessage(deletePath, displaySensitiveText),
               });
-              localHistory = appendModelMessage(localHistory, buildDeleteConfirmationMessage(deletePath), "DELETE_FILE");
+              localHistory = appendModelMessage(localHistory, buildDeleteConfirmationMessage(deletePath, displaySensitiveText), "DELETE_FILE");
+            }
+            break;
+          }
+          case "RENAME_FILE": {
+            const payload = result.payload || {};
+            const rawFromPath = getRenameFromPath(payload, lastAgentReadFile?.path || fileContent?.path || "");
+            const fromPath = rawFromPath ? resolveCommandPath(rawFromPath, rootDirective, localHistory) : "";
+            const rawToPath = getRenameToPath(payload) || getRenameDestinationName(rootDirective);
+            const toPath = fromPath && rawToPath
+              ? buildSiblingRenamePath(fromPath, rawToPath)
+              : "";
+            if (!fromPath || !toPath) {
+              localHistory = appendModelMessage(localHistory, "I need both source and destination paths before I can rename the file.", "RENAME_FILE");
+              break;
+            }
+            try {
+              await executeRenameFile(fromPath, toPath);
+              localHistory = appendModelMessage(localHistory, buildFileRenameResponse(fromPath, toPath, displaySensitiveText), "RENAME_FILE");
+            } catch (error: any) {
+              const message = error.message || "Unknown error";
+              localHistory = appendModelMessage(localHistory, `Rename failed: ${message}`, "RENAME_FILE");
             }
             break;
           }

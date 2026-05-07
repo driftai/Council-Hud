@@ -86,7 +86,14 @@ export class NexusClient {
       }
 
       if (!response.ok) {
-        throw new Error(`Nexus Node Error: ${response.status}`);
+        let detail = "";
+        try {
+          const errorData = await response.clone().json();
+          detail = errorData?.error || errorData?.message || "";
+        } catch {
+          detail = "";
+        }
+        throw new Error(detail ? `Nexus Node Error: ${response.status} - ${detail}` : `Nexus Node Error: ${response.status}`);
       }
 
       const data = await response.json();

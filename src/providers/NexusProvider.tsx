@@ -39,6 +39,7 @@ interface NexusContextType {
   readFile: (path: string, options?: ReadFileOptions) => Promise<string | null>;
   writeFile: (path: string, content: string) => Promise<void>;
   deleteFile: (path: string) => Promise<void>;
+  renameFile: (fromPath: string, toPath: string) => Promise<void>;
   killProcess: (pid: number) => Promise<void>;
   addManualLog: (type: string, payload: any) => void;
   clearLogs: () => void;
@@ -211,6 +212,12 @@ export function NexusProvider({ children }: { children: React.ReactNode }) {
     if (payload.path) {
       payload.path = decodeURIComponent(payload.path).replace(/\\/g, '/').replace(/\/+$/, '');
     }
+    if (payload.fromPath) {
+      payload.fromPath = decodeURIComponent(payload.fromPath).replace(/\\/g, '/').replace(/\/+$/, '');
+    }
+    if (payload.toPath) {
+      payload.toPath = decodeURIComponent(payload.toPath).replace(/\\/g, '/').replace(/\/+$/, '');
+    }
 
     let endpoint = '/nexus/command';
     let bodyPayload = { cmd, ...payload };
@@ -223,6 +230,9 @@ export function NexusProvider({ children }: { children: React.ReactNode }) {
     } else if (cmd === 'DELETE_FILE') {
       endpoint = '/delete-file';
       bodyPayload = { path: payload.path };
+    } else if (cmd === 'RENAME_FILE') {
+      endpoint = '/rename-file';
+      bodyPayload = { fromPath: payload.fromPath, toPath: payload.toPath };
     } else if (cmd === 'SET_PATH') {
       endpoint = '/filesystem/tree';
       bodyPayload = { path: payload.path, reset: payload.reset, depth: payload.depth };
@@ -300,6 +310,18 @@ export function NexusProvider({ children }: { children: React.ReactNode }) {
     }
   }, [sendCommand, addManualLog]);
 
+  const renameFile = useCallback(async (fromPath: string, toPath: string) => {
+    if (!clientRef.current || !fromPath || !toPath) return;
+    try {
+      await sendCommand("RENAME_FILE", { fromPath, toPath });
+      setFileContent(prev => prev?.path === fromPath ? { path: toPath, content: prev.content } : prev);
+      addManualLog("FILE_RENAME", { fromPath, toPath });
+    } catch (e: any) {
+      addManualLog("ERROR", `Rename Failure: ${e.message}`);
+      throw e;
+    }
+  }, [sendCommand, addManualLog]);
+
   const killProcess = useCallback(async (pid: number) => {
     await sendCommand("KILL_PROCESS", { pid });
   }, [sendCommand]);
@@ -313,7 +335,7 @@ export function NexusProvider({ children }: { children: React.ReactNode }) {
     <NexusContext.Provider value={{ 
       state, systemHealth, knowledgeGraph, fileChanges, fileTree, nexusLogs,
       lastUpdate, url, nexusKey, status, fileContent, consecutiveFailures, workingDirectory,
-      setFileContent, refreshTelemetry: fetchData, authorize, sendCommand, readFile, writeFile, deleteFile, killProcess, addManualLog, clearLogs, updateUrl, updateKey
+      setFileContent, refreshTelemetry: fetchData, authorize, sendCommand, readFile, writeFile, deleteFile, renameFile, killProcess, addManualLog, clearLogs, updateUrl, updateKey
     }}>
       {children}
     </NexusContext.Provider>
