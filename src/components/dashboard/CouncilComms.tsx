@@ -56,6 +56,18 @@ const SCOPE_STORAGE_KEY = "council-hud-scope";
 const TOPIC_STORAGE_KEY = "council-hud-topic";
 const TARGET_STORAGE_KEY = "council-hud-target";
 const CLEAR_PREFIX = "council-hud-clear-before";
+const SHOW_ACKS_STORAGE_KEY = "council-hud-show-acks";
+const BRIDGE_STALE_MS = 3 * 60 * 1000;
+
+function formatAgeShort(deltaMs: number) {
+  if (deltaMs < 0) return "now";
+  const seconds = Math.floor(deltaMs / 1000);
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours}h`;
+}
 
 function formatMessageTime(timestamp: string) {
   const date = new Date(timestamp);
@@ -126,7 +138,23 @@ export function CouncilComms() {
   const [isSending, setIsSending] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [showAcks, setShowAcks] = useState(false);
+  const [bridgeClockTick, setBridgeClockTick] = useState(0);
   const scrollRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const interval = setInterval(() => setBridgeClockTick((value) => value + 1), 5000);
+    return () => clearInterval(interval);
+  }, []);
+
+  useEffect(() => {
+    const stored = window.localStorage.getItem(SHOW_ACKS_STORAGE_KEY);
+    if (stored === "1") setShowAcks(true);
+  }, []);
+
+  useEffect(() => {
+    window.localStorage.setItem(SHOW_ACKS_STORAGE_KEY, showAcks ? "1" : "0");
+  }, [showAcks]);
 
   const activeClearKey = useMemo(
     () => buildClearKey(scope, sessionName, topic, target),
@@ -231,10 +259,40 @@ export function CouncilComms() {
   const allMessages = useMemo(() => {
     const merged = [...messages, ...pendingMessages]
       .filter((message) => messageMatchesScope(message, scope, sessionName, topic, target))
-      .filter((message) => Date.parse(message.timestamp) > clearBefore);
+      .filter((message) => Date.parse(message.timestamp) > clearBefore)
+      .filter((message) => showAcks || message.kind !== "ack");
     return merged.sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp));
-  }, [clearBefore, messages, pendingMessages, scope, sessionName, target, topic]);
+  }, [clearBefore, messages, pendingMessages, scope, sessionName, target, topic, showAcks]);
   const lastPacket = allMessages.at(-1);
+
+  // Per-bridge delivery health: track the latest ACK timestamp from each *-bridge sender,
+  // and surface its age. Bridges run their own poll loops outside the HUD; this lets Drift
+  // see at a glance which bridges are flowing and which are lagging behind a broadcast.
+  const bridgeStatus = useMemo(() => {
+    const latest = new Map<string, number>();
+    for (const message of messages) {
+      if (message.kind !== "ack") continue;
+      const senderName = message.sender || "";
+      if (!senderName.toLowerCase().endsWith("-bridge")) continue;
+      const ts = Date.parse(message.timestamp);
+      if (!Number.isFinite(ts)) continue;
+      const previous = latest.get(senderName) || 0;
+      if (ts > previous) latest.set(senderName, ts);
+    }
+    return Array.from(latest.entries())
+      .map(([name, ts]) => ({ name, ts }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }, [messages]);
+  // Count hidden ACKs so the toggle hint is informative.
+  const hiddenAckCount = useMemo(() => {
+    if (showAcks) return 0;
+    return messages.filter((message) => (
+      message.kind === "ack"
+      && messageMatchesScope(message, scope, sessionName, topic, target)
+      && Date.parse(message.timestamp) > clearBefore
+    )).length;
+  }, [clearBefore, messages, scope, sessionName, target, topic, showAcks]);
+  const nowForBridgeAges = bridgeClockTick * 0 + Date.now();
 
   useEffect(() => {
     if (!scrollRef.current) return;
@@ -457,7 +515,7 @@ export function CouncilComms() {
         </div>
 
         <div className="flex items-center justify-between gap-3 rounded border border-white/10 bg-black/20 px-3 py-2">
-          <div className="min-w-0">
+          <div className="min-w-0 flex-1">
             <p className="truncate font-mono text-[10px] uppercase text-primary">
               {sessionName}{" -> "}{scopeLabel}
             </p>
@@ -489,6 +547,18 @@ export function CouncilComms() {
             <Button
               type="button"
               variant="outline"
+              onClick={() => setShowAcks((prev) => !prev)}
+              className={cn(
+                "h-8 w-8 border-white/10 bg-transparent p-0 hover:bg-white/5",
+                showAcks && "border-secondary/40 text-secondary"
+              )}
+              title={showAcks ? "Hide bridge ACKs" : hiddenAckCount > 0 ? `Show ${hiddenAckCount} hidden delivery ACK${hiddenAckCount === 1 ? "" : "s"}` : "Show bridge ACKs"}
+            >
+              <CheckCircle2 className="h-3.5 w-3.5" />
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
               onClick={handleClearView}
               className="h-8 w-8 border-white/10 bg-transparent p-0 hover:bg-white/5"
               title="Clear local view"
@@ -507,6 +577,30 @@ export function CouncilComms() {
             </Button>
           </div>
         </div>
+
+        {bridgeStatus.length > 0 && (
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1 rounded border border-white/10 bg-black/20 px-3 py-1.5 font-mono text-[8px] uppercase">
+            <span className="text-muted-foreground/70">Bridges:</span>
+            {bridgeStatus.map((bridge) => {
+              const age = nowForBridgeAges - bridge.ts;
+              const stale = age > BRIDGE_STALE_MS;
+              const veryStale = age > BRIDGE_STALE_MS * 2;
+              return (
+                <span
+                  key={bridge.name}
+                  title={`Last delivery ack from ${bridge.name}: ${new Date(bridge.ts).toLocaleString()}`}
+                  className={cn(
+                    "inline-flex items-center gap-1 rounded border px-1",
+                    veryStale ? "border-destructive/40 text-destructive" : stale ? "border-yellow-500/40 text-yellow-400" : "border-secondary/30 text-secondary"
+                  )}
+                >
+                  {bridge.name.replace(/-bridge$/, "")}
+                  <span className="text-muted-foreground/80">{formatAgeShort(age)}</span>
+                </span>
+              );
+            })}
+          </div>
+        )}
 
         <ScrollArea className="min-h-0 flex-1 rounded border border-white/10 bg-black/30 p-3" viewportRef={scrollRef}>
           <div className="space-y-3 pr-2">
@@ -574,7 +668,7 @@ export function CouncilComms() {
         <div className="grid grid-cols-3 gap-2 font-mono text-[8px] uppercase">
           <div className="rounded border border-white/10 bg-black/20 px-2 py-1 text-muted-foreground">
             <MessageSquare className="mr-1 inline h-3 w-3 text-primary" />
-            {allMessages.length} view
+            {allMessages.length} view{hiddenAckCount > 0 ? ` · ${hiddenAckCount} ack hidden` : ""}
           </div>
           <div className="rounded border border-white/10 bg-black/20 px-2 py-1 text-muted-foreground">
             {pendingMessages.length} pending
