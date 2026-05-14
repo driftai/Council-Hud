@@ -98,7 +98,7 @@ export function NexusLogs() {
         </div>
       }
     >
-      <ScrollArea className="h-[250px] -mx-4 px-4">
+      <ScrollArea className="h-[340px] -mx-4 px-4">
         <div className="space-y-3 py-2">
           {nexusLogs.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-10 opacity-20">

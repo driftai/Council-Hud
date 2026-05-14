@@ -276,7 +276,7 @@ export function SmartFallback() {
           </span>
         </div>
 
-        <ScrollArea className="h-[260px] rounded border border-white/10 bg-black/30 p-2">
+        <ScrollArea className="h-[340px] rounded border border-white/10 bg-black/30 p-2">
           <div className="space-y-1">
             {visibleModels.length === 0 ? (
               <div className="flex items-center gap-2 rounded border border-white/10 bg-black/20 p-2 font-mono text-[10px] text-muted-foreground">

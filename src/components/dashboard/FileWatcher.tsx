@@ -190,7 +190,7 @@ export function FileWatcher() {
         </div>
       }
     >
-      <div className="h-[300px] flex flex-col">
+      <div className="h-[360px] flex flex-col">
         <div className="mb-3 flex items-center gap-2 rounded-lg border border-white/5 bg-black/20 p-2">
           <Button
             type="button"

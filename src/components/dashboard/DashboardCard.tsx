@@ -104,17 +104,27 @@ export function DashboardCard({
       
       {(title || subtitle) && (
         <div className={cn(
-          "flex items-center justify-between gap-3 px-4 py-3 bg-white/[0.02]",
-          !isCollapsed && "border-b border-white/5"
+          "relative flex items-center justify-between gap-3 px-5 py-4 bg-gradient-to-b from-white/[0.04] to-white/[0.02]",
+          !isCollapsed && "border-b border-white/10"
         )}>
-          <div className="min-w-0">
+          {/* Left-edge accent stripe so card titles read as headers, not labels. */}
+          <span
+            aria-hidden="true"
+            className={cn(
+              "absolute left-0 top-3 bottom-3 w-[3px] rounded-r",
+              variant === "green" ? "bg-secondary/70"
+                : variant === "cyan" ? "bg-primary/70"
+                : "bg-primary/40"
+            )}
+          />
+          <div className="min-w-0 pl-2">
             {title && (
-              <h3 className="truncate font-headline font-semibold text-sm uppercase tracking-wider text-foreground/90">
+              <h3 className="truncate font-headline font-bold text-base uppercase tracking-[0.14em] text-foreground">
                 {title}
               </h3>
             )}
             {subtitle && (
-              <p className="truncate font-mono-readout text-[10px] text-muted-foreground">
+              <p className="mt-0.5 truncate font-mono-readout text-[11px] text-muted-foreground/90">
                 {subtitle}
               </p>
             )}
@@ -128,17 +138,17 @@ export function DashboardCard({
                 aria-expanded={!isCollapsed}
                 aria-label={`${isCollapsed ? "Expand" : "Collapse"} ${title || "card"}`}
                 title={isCollapsed ? "Expand card" : "Collapse card"}
-                className="flex h-7 w-7 items-center justify-center rounded border border-white/10 bg-black/30 text-muted-foreground transition-colors hover:border-primary/30 hover:bg-primary/10 hover:text-primary focus:outline-none focus:ring-1 focus:ring-primary"
+                className="flex h-8 w-8 items-center justify-center rounded border border-white/10 bg-black/30 text-muted-foreground transition-colors hover:border-primary/30 hover:bg-primary/10 hover:text-primary focus:outline-none focus:ring-1 focus:ring-primary"
                 onClick={toggleCollapse}
               >
-                {isCollapsed ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronUp className="h-3.5 w-3.5" />}
+                {isCollapsed ? <ChevronDown className="h-4 w-4" /> : <ChevronUp className="h-4 w-4" />}
               </button>
             )}
           </div>
         </div>
       )}
       {!isCollapsed && (
-        <div id={contentId} className="flex-1 p-4 relative scanline" data-dashboard-card-content>
+        <div id={contentId} className="flex-1 p-5 relative scanline" data-dashboard-card-content>
           {children}
         </div>
       )}

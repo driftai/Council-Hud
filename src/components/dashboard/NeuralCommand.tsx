@@ -2849,7 +2849,7 @@ Tell the user the file could not be read and include the failure reason.`,
         }
         className="border-primary/20 bg-primary/5"
       >
-      <div className="flex flex-col gap-4 h-[350px]">
+      <div className="flex flex-col gap-4 h-[clamp(380px,52vh,720px)]">
         <ScrollArea className="flex-1 rounded-lg bg-black/40 border border-white/5 p-4 relative" viewportRef={scrollRef}>
           <div className="absolute top-2 right-2 p-2 opacity-5 pointer-events-none"><Brain className="w-12 h-12" /></div>
           <div className="space-y-4">

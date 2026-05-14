@@ -298,7 +298,7 @@ export function KnowledgeGraph() {
     >
       <div
         ref={viewportRef}
-        className="relative h-[300px] touch-none overflow-hidden rounded-lg border border-white/5 bg-black/40 cursor-grab active:cursor-grabbing"
+        className="relative h-[360px] touch-none overflow-hidden rounded-lg border border-white/5 bg-black/40 cursor-grab active:cursor-grabbing"
         data-graph-viewport
         onPointerDown={handleGraphPointerDown}
         onPointerMove={handleGraphPointerMove}

@@ -368,7 +368,7 @@ export function NeuralVisualizer() {
       className="col-span-1 lg:col-span-2"
     >
       <div
-        className="relative h-[300px] overflow-hidden rounded-lg bg-black/40 cursor-crosshair"
+        className="relative h-[360px] overflow-hidden rounded-lg bg-black/40 cursor-crosshair"
         data-neural-visualizer
         onPointerMove={handlePatternPointerMove}
         onPointerLeave={handlePatternPointerLeave}

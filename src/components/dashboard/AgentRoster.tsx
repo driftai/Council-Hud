@@ -276,7 +276,7 @@ export function AgentRoster() {
           </div>
         </div>
       )}
-      <ScrollArea className="h-[260px] pr-4">
+      <ScrollArea className="h-[340px] pr-4">
         <div className="space-y-3 py-1">
           {groupedAgents.length === 0 ? (
             <div className="rounded border border-white/10 bg-black/20 p-3 font-mono text-[10px] text-muted-foreground">
