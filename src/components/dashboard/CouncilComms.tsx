@@ -292,7 +292,8 @@ export function CouncilComms() {
       && Date.parse(message.timestamp) > clearBefore
     )).length;
   }, [clearBefore, messages, scope, sessionName, target, topic, showAcks]);
-  const nowForBridgeAges = bridgeClockTick * 0 + Date.now();
+  // Re-snapshot Date.now() each time the 5s clock tick fires so the bridge age pills refresh.
+  const nowForBridgeAges = useMemo(() => Date.now(), [bridgeClockTick]);
 
   useEffect(() => {
     if (!scrollRef.current) return;
