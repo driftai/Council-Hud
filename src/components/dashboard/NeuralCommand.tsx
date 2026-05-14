@@ -3,7 +3,7 @@
 
 import { useState, useRef, useEffect } from "react";
 import { DashboardCard } from "./DashboardCard";
-import { Terminal, Send, Sparkles, AlertCircle, Brain, Command, Trash2, X } from "lucide-react";
+import { Terminal, Send, Sparkles, AlertCircle, Brain, Command, Trash2, X, Copy, Check } from "lucide-react";
 import { useNexus } from "@/providers/NexusProvider";
 import { nexusCommand } from "@/ai/flows/nexus-commander";
 import { Input } from "@/components/ui/input";
@@ -2343,10 +2343,8 @@ For emoji-only requests, payload.content must contain visible emoji only plus wh
       return;
     }
 
-    if (!isSilent && wantsCasualConversation(input)) {
-      appendModelMessage(localHistory, buildCasualResponse(input));
-      return;
-    }
+    // Casual chat / greetings now route through NVIDIA so replies feel like the agent talking,
+    // not a canned line.
 
     const visibleDirectoryNavigationTarget = getDirectoryNavigationTarget(
       input,
@@ -2366,35 +2364,9 @@ For emoji-only requests, payload.content must contain visible emoji only plus wh
       return;
     }
 
-    if (!isSilent && wantsCurrentFolderQuestion(input)) {
-      appendModelMessage(localHistory, buildCurrentFolderResponse(fileTree, workingDirectory, displaySensitiveText));
-      return;
-    }
-
-    if (!isSilent && wantsFolderOnlyListing(input, localHistory)) {
-      setIsLoading(true);
-      try {
-        await handleFolderOnlyListingRequest(input, localHistory);
-      } finally {
-        setIsLoading(false);
-      }
-      return;
-    }
-
-    if (!isSilent && wantsWorkspaceInventory(input)) {
-      addManualLog("FILESYSTEM_TREE", "Answered workspace inventory without reading file contents");
-      appendModelMessage(localHistory, buildWorkspaceInventoryResponse(fileTree));
-      return;
-    }
-
-    if (!isSilent && wantsFolderInventory(input, localHistory)) {
-      const inventoryResponse = buildFolderInventoryResponse(input, localHistory, fileTree, displaySensitiveText);
-      if (inventoryResponse) {
-        addManualLog("FILESYSTEM_TREE", `Answered folder inventory without reading file contents`);
-        appendModelMessage(localHistory, inventoryResponse);
-        return;
-      }
-    }
+    // Folder/workspace inventory and "what folder am I in" prompts now route through NVIDIA.
+    // The directory tree + workspace are already supplied as system-prompt context, so the LLM
+    // describes them in its own words instead of dumping a hardcoded "I can see these folders" list.
 
     if (!isSilent && wantsCorrectionOnly(input)) {
       addManualLog("NEURAL", "Handled correction locally without calling Neural Bridge");
@@ -2556,14 +2528,12 @@ For emoji-only requests, payload.content must contain visible emoji only plus wh
 
       // --- SYNCHRONOUS HANDSHAKE LOOP ---
       if (result.command === "READ_FILE") {
-        const readPathSet = new Set(
+        const readPathSet = new Set<string>(
           getReadFilePaths(result.payload || {})
             .map((path) => resolveCommandPath(path, rootDirective, localHistory))
             .filter(Boolean)
         );
-        if (wantsMultipleFileRead(rootDirective)) {
-          inferredReadPaths.forEach((path) => readPathSet.add(path));
-        }
+        // NVIDIA decides which paths to read; no local augmentation of the path set here.
         const readPaths = constrainPathsToExplicitFiles(
           constrainPathsToRequestedFolder(Array.from(readPathSet), rootDirective, localHistory, fileTree),
           rootDirective,
@@ -2782,6 +2752,52 @@ Tell the user the file could not be read and include the failure reason.`,
     processAiTurn(currentInput, messages, false, currentInput);
   };
 
+  const [copiedTranscript, setCopiedTranscript] = useState(false);
+
+  const buildTranscript = () => {
+    if (messages.length === 0) return "";
+    const lines: string[] = [
+      `Council HUD — Nexus conversation`,
+      `Exported: ${new Date().toISOString()}`,
+      `Messages: ${messages.length}`,
+      "",
+    ];
+    for (const msg of messages) {
+      const speaker = msg.role === "model" ? "NEXUS" : "USER";
+      const stamp = new Date(msg.timestamp).toISOString();
+      const cmd = msg.command ? ` [${msg.command}]` : "";
+      lines.push(`--- ${speaker}${cmd} @ ${stamp} ---`);
+      lines.push(msg.content);
+      lines.push("");
+    }
+    return lines.join("\n");
+  };
+
+  const handleCopyConversation = async () => {
+    const transcript = buildTranscript();
+    if (!transcript) return;
+    try {
+      if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(transcript);
+      } else {
+        const textarea = document.createElement("textarea");
+        textarea.value = transcript;
+        textarea.setAttribute("readonly", "");
+        textarea.style.position = "fixed";
+        textarea.style.opacity = "0";
+        document.body.appendChild(textarea);
+        textarea.select();
+        document.execCommand("copy");
+        document.body.removeChild(textarea);
+      }
+      setCopiedTranscript(true);
+      addManualLog("NEURAL", `Copied Nexus transcript (${messages.length} msgs)`);
+      setTimeout(() => setCopiedTranscript(false), 1500);
+    } catch (error: any) {
+      addManualLog("ERROR", `Copy failed: ${error?.message || "Unknown error"}`);
+    }
+  };
+
   return (
     <>
       <AlertDialog open={Boolean(pendingDelete)} onOpenChange={(open) => !open && setPendingDelete(null)}>
@@ -2810,10 +2826,25 @@ Tell the user the file could not be read and include the failure reason.`,
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
-      <DashboardCard 
-        title="Neural Command" 
+      <DashboardCard
+        title="Neural Command"
         subtitle="AI-Driven Orchestration"
-        headerAction={<Sparkles className={cn("w-4 h-4", isLoading ? "text-primary animate-spin" : "text-secondary")} />}
+        headerAction={
+          <>
+            <button
+              type="button"
+              onClick={handleCopyConversation}
+              disabled={messages.length === 0}
+              title={messages.length === 0 ? "No conversation to copy yet" : `Copy ${messages.length} message${messages.length === 1 ? "" : "s"}`}
+              aria-label="Copy Nexus conversation"
+              className="flex h-7 items-center gap-1 rounded border border-white/10 bg-black/30 px-2 text-[9px] uppercase tracking-wider text-muted-foreground transition-colors hover:border-primary/30 hover:bg-primary/10 hover:text-primary focus:outline-none focus:ring-1 focus:ring-primary disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-white/10 disabled:hover:bg-black/30 disabled:hover:text-muted-foreground"
+            >
+              {copiedTranscript ? <Check className="h-3 w-3 text-secondary" /> : <Copy className="h-3 w-3" />}
+              <span>{copiedTranscript ? "Copied" : "Copy Log"}</span>
+            </button>
+            <Sparkles className={cn("w-4 h-4", isLoading ? "text-primary animate-spin" : "text-secondary")} />
+          </>
+        }
         className="border-primary/20 bg-primary/5"
       >
       <div className="flex flex-col gap-4 h-[350px]">
