@@ -8,7 +8,9 @@ import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 import {
   AlertCircle,
+  Check,
   CheckCircle2,
+  Copy,
   Eraser,
   MessageSquare,
   Radio,
@@ -98,12 +100,15 @@ function messageMatchesScope(message: CouncilMessage, scope: Scope, sessionName:
     return message.topic === cleanTopicName(topic) && (!message.to || message.to === "*");
   }
   if (scope === "dm") {
-    return (message.sender === sessionName && message.to === target)
-      || (message.sender === target && message.to === sessionName)
-      || (message.sender === target && message.to === "operator")
-      || (message.sender === "operator" && message.to === target);
+    const cleanTarget = cleanSessionName(target, "target");
+    return (message.sender === sessionName && message.to === cleanTarget)
+      || (message.sender === cleanTarget && message.to === sessionName)
+      || (message.sender === cleanTarget && message.to === "operator")
+      || (message.sender === "operator" && message.to === cleanTarget);
   }
-  return message.to === "*" && !message.topic;
+  // Broadcast = any message addressed to "*" regardless of topic. The hub requires a topic for
+  // fanout, so broadcasts carry topic="council" by default; show them here too.
+  return message.to === "*";
 }
 
 export function CouncilComms() {
@@ -306,6 +311,54 @@ export function CouncilComms() {
     setPendingMessages([]);
   };
 
+  const [copiedTranscript, setCopiedTranscript] = useState(false);
+
+  const buildCommsTranscript = () => {
+    if (allMessages.length === 0) return "";
+    const lines: string[] = [
+      `Council Comms — ${scopeLabel}`,
+      `Session: ${sessionName}`,
+      `Exported: ${new Date().toISOString()}`,
+      `Messages: ${allMessages.length}`,
+      "",
+    ];
+    for (const message of allMessages) {
+      const stamp = new Date(message.timestamp).toISOString();
+      const route = message.to && message.to !== "*" ? ` -> ${message.to}` : "";
+      const topicTag = message.topic ? ` #${message.topic}` : "";
+      const kindTag = message.kind && message.kind !== "chat" ? ` [${message.kind}]` : "";
+      const pendingTag = message.pending ? " (pending)" : "";
+      lines.push(`--- ${message.sender}${route}${topicTag}${kindTag}${pendingTag} @ ${stamp} ---`);
+      lines.push(message.content || "(empty message)");
+      lines.push("");
+    }
+    return lines.join("\n");
+  };
+
+  const handleCopyComms = async () => {
+    const transcript = buildCommsTranscript();
+    if (!transcript) return;
+    try {
+      if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(transcript);
+      } else {
+        const textarea = document.createElement("textarea");
+        textarea.value = transcript;
+        textarea.setAttribute("readonly", "");
+        textarea.style.position = "fixed";
+        textarea.style.opacity = "0";
+        document.body.appendChild(textarea);
+        textarea.select();
+        document.execCommand("copy");
+        document.body.removeChild(textarea);
+      }
+      setCopiedTranscript(true);
+      setTimeout(() => setCopiedTranscript(false), 1500);
+    } catch (copyError: any) {
+      setError(copyError?.message || "Copy failed.");
+    }
+  };
+
   const handleNewSession = async () => {
     if (isSending) return;
     const confirmed = window.confirm(`Send /new to ${scopeLabel} and clear this HUD conversation view?`);
@@ -422,6 +475,16 @@ export function CouncilComms() {
               title="Refresh council bridge"
             >
               <RefreshCcw className={cn("h-3.5 w-3.5", isRefreshing && "animate-spin")} />
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={handleCopyComms}
+              disabled={allMessages.length === 0}
+              className="h-8 w-8 border-white/10 bg-transparent p-0 hover:bg-white/5 disabled:opacity-40"
+              title={allMessages.length === 0 ? "No messages to copy" : `Copy ${allMessages.length} message${allMessages.length === 1 ? "" : "s"} from this view`}
+            >
+              {copiedTranscript ? <Check className="h-3.5 w-3.5 text-secondary" /> : <Copy className="h-3.5 w-3.5" />}
             </Button>
             <Button
               type="button"

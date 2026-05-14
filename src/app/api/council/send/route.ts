@@ -38,7 +38,9 @@ export async function POST(request: NextRequest) {
   const from = cleanName(body?.from, "operator");
   const scope = VALID_SCOPES.has(String(body?.scope || "")) ? String(body.scope) : "topic";
   const to = scope === "dm" ? cleanName(body?.to, "agent-e-bridge") : "*";
-  const topic = scope === "topic" ? cleanTopic(body?.topic, "council") : null;
+  // The IPC hub fans out by topic — even broadcasts must carry one or they get silently dropped.
+  // DMs ride on a private channel (no topic).
+  const topic = scope === "dm" ? null : cleanTopic(body?.topic, "council");
   const kind = VALID_KINDS.has(String(body?.kind || "")) ? String(body.kind) : "chat";
 
   try {

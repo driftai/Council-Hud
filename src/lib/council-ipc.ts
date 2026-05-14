@@ -259,7 +259,10 @@ export async function sendCouncilMessage({
     content,
     kind,
   };
-  if (to === "*" && topic !== null) payload.topic = topic || "council";
+  // The hub silently drops topic-less broadcasts. Always attach a topic for fanout sends ("*"),
+  // defaulting to "council" so live agents subscribed to that channel receive it. DMs (to !== "*")
+  // skip the topic on purpose so the hub routes them as a private direct message.
+  if (to === "*") payload.topic = topic || "council";
 
   const script = `
 import json
