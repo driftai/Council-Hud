@@ -12,7 +12,9 @@ import {
   CheckCircle2,
   Copy,
   Eraser,
+  Maximize2,
   MessageSquare,
+  Minimize2,
   Radio,
   RefreshCcw,
   RotateCcw,
@@ -140,7 +142,17 @@ export function CouncilComms() {
   const [error, setError] = useState<string | null>(null);
   const [showAcks, setShowAcks] = useState(false);
   const [bridgeClockTick, setBridgeClockTick] = useState(0);
+  const [isExpanded, setIsExpanded] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!isExpanded) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setIsExpanded(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [isExpanded]);
 
   useEffect(() => {
     const interval = setInterval(() => setBridgeClockTick((value) => value + 1), 5000);
@@ -436,11 +448,29 @@ export function CouncilComms() {
   };
 
   return (
+    <>
+      {isExpanded && (
+        <div
+          className="fixed inset-0 z-40 bg-black/75 backdrop-blur-sm"
+          onClick={() => setIsExpanded(false)}
+          aria-hidden="true"
+        />
+      )}
     <DashboardCard
       title="Council Comms"
       subtitle="IPC Hub Mirror"
+      className={isExpanded ? "fixed inset-4 z-50 !min-h-0 shadow-2xl" : ""}
       headerAction={
         <div className="flex items-center gap-2 font-mono text-[9px] uppercase">
+          <button
+            type="button"
+            onClick={() => setIsExpanded((value) => !value)}
+            className="flex h-6 w-6 items-center justify-center rounded border border-white/10 bg-black/30 text-muted-foreground transition-colors hover:border-primary/30 hover:bg-primary/10 hover:text-primary"
+            title={isExpanded ? "Collapse panel (Esc)" : "Expand panel"}
+            aria-label={isExpanded ? "Collapse Council Comms" : "Expand Council Comms"}
+          >
+            {isExpanded ? <Minimize2 className="h-3 w-3" /> : <Maximize2 className="h-3 w-3" />}
+          </button>
           <Users className="h-3.5 w-3.5 text-primary" />
           <span className={status.ok ? "text-secondary" : "text-destructive"}>
             {status.ok ? `${status.sessions.length} linked` : "offline"}
@@ -448,7 +478,7 @@ export function CouncilComms() {
         </div>
       }
     >
-      <div className="flex h-[580px] flex-col gap-3">
+      <div className={cn("flex flex-col gap-2", isExpanded ? "h-full" : "h-[clamp(640px,80vh,1040px)]")}>
         <div className="grid grid-cols-[1fr_auto] gap-2">
           <input
             value={sessionDraft}
@@ -680,5 +710,6 @@ export function CouncilComms() {
         </div>
       </div>
     </DashboardCard>
+    </>
   );
 }
