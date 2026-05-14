@@ -1543,7 +1543,7 @@ function isEmptyBridgeResponse(message: string) {
 
 export function NeuralCommand() {
   const nexus = useNexus();
-  const { state, knowledgeGraph, fileTree, systemHealth, url, addManualLog, fileContent, workingDirectory } = nexus;
+  const { state, knowledgeGraph, fileTree, systemHealth, systemHealthAverage, url, addManualLog, fileContent, workingDirectory } = nexus;
   
   const [prompt, setPrompt] = useState("");
   const [isLoading, setIsLoading] = useState(false);
@@ -2475,6 +2475,8 @@ For emoji-only requests, payload.content must contain visible emoji only plus wh
           processes: knowledgeGraph?.nodes || [],
           fileTree: fileTree || [],
           systemHealth: systemHealth || {},
+          systemHealthAverage: systemHealthAverage || undefined,
+          connectionState: state,
           currentUrl: url,
           workingDirectory: workingDirectory || "C:/",
           lastReadFile: contextReadFile

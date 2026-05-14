@@ -8,9 +8,17 @@ const WSL_WORKSPACE = "/home/linux-user/.openclaw/workspace";
 const HUB_URL = process.env.COUNCIL_HUB_URL || "http://10.255.255.254:3179";
 const WORKSPACE_UNC = process.env.COUNCIL_WORKSPACE_UNC
   || "\\\\wsl.localhost\\Ubuntu\\home\\linux-user\\.openclaw\\workspace";
+// Read the universal IPC journal — every council packet (drift, eve, prime, echo, vesper, meru, bridges)
+// lands here. Per-agent inboxes like nova-inbox.jsonl only contain that agent's filtered slice and go
+// stale whenever the agent disconnects.
 const INBOX_JSONL = process.env.COUNCIL_INBOX_JSONL
-  || `${WORKSPACE_UNC}\\logs\\nova-inbox.jsonl`;
+  || `${WORKSPACE_UNC}\\logs\\council-journal.jsonl`;
+// When the live journal has just rotated and is small, fall back to the previous file so the HUD
+// still shows recent context.
+const INBOX_JSONL_ROLLOVER = process.env.COUNCIL_INBOX_JSONL_PREV
+  || `${INBOX_JSONL}.1`;
 const TAIL_BYTES = 512 * 1024;
+const ROLLOVER_MIN_BYTES = 4 * 1024;
 
 export type CouncilSession = {
   name: string;
@@ -155,15 +163,44 @@ function buildMessageId(message: CouncilMessage, index: number) {
   return `${message.timestamp}|${message.sender}|${message.kind}|${index}|${message.content.slice(0, 40)}`;
 }
 
+async function readJournalRaw(): Promise<{ raw: string; sources: string[] }> {
+  let live = "";
+  let liveError: unknown = null;
+  try {
+    live = await readTail(INBOX_JSONL);
+  } catch (error) {
+    liveError = error;
+  }
+
+  const liveBytes = Buffer.byteLength(live, "utf8");
+  if (liveBytes >= ROLLOVER_MIN_BYTES) {
+    return { raw: live, sources: [INBOX_JSONL] };
+  }
+
+  let rollover = "";
+  try {
+    rollover = await readTail(INBOX_JSONL_ROLLOVER);
+  } catch {
+    if (liveError && !live) throw liveError;
+    return { raw: live, sources: [INBOX_JSONL] };
+  }
+
+  const combined = live ? `${rollover}\n${live}` : rollover;
+  return { raw: combined, sources: [INBOX_JSONL_ROLLOVER, INBOX_JSONL] };
+}
+
 export async function readCouncilMessages(limit = 80) {
   let raw = "";
+  let sources: string[] = [INBOX_JSONL];
   try {
-    raw = await readTail(INBOX_JSONL);
+    const result = await readJournalRaw();
+    raw = result.raw;
+    sources = result.sources;
   } catch {
     return {
       messages: [] as CouncilMessage[],
       source: INBOX_JSONL,
-      error: "Council inbox is not readable yet.",
+      error: "Council journal is not readable yet.",
     };
   }
 
@@ -196,7 +233,7 @@ export async function readCouncilMessages(limit = 80) {
 
   return {
     messages,
-    source: INBOX_JSONL,
+    source: sources.join(" + "),
     error: null,
   };
 }

@@ -14,6 +14,14 @@ export interface NexusLog {
   payload: any;
 }
 
+export interface SystemHealthAverage {
+  samples: number;
+  windowSeconds: number;
+  cpuLoad: number | null;
+  ramUsed: number | null;
+  cpuTemp: number | null;
+}
+
 type ReadFileOptions = {
   openInspector?: boolean;
 };
@@ -21,6 +29,7 @@ type ReadFileOptions = {
 interface NexusContextType {
   state: ConnectionState;
   systemHealth: any | null;
+  systemHealthAverage: SystemHealthAverage | null;
   knowledgeGraph: any | null;
   fileChanges: any[];
   fileTree: any | null;
@@ -78,9 +87,55 @@ export function NexusProvider({ children }: { children: React.ReactNode }) {
   const [fileContent, setFileContent] = useState<{ path: string; content: string } | null>(null);
   const [consecutiveFailures, setConsecutiveFailures] = useState(0);
   const [workingDirectory, setWorkingDirectory] = useState<string>("");
-  
+  const [systemHealthAverage, setSystemHealthAverage] = useState<SystemHealthAverage | null>(null);
+
   const clientRef = useRef<NexusClient | null>(null);
   const isFetchingRef = useRef(false);
+  const healthHistoryRef = useRef<Array<{ ts: number; cpuLoad: number | null; ramUsed: number | null; cpuTemp: number | null }>>([]);
+
+  const HEALTH_WINDOW_MS = 60_000;
+  const HEALTH_SAMPLE_LIMIT = 60;
+
+  const recordHealthSample = useCallback((sample: any) => {
+    if (!sample || typeof sample !== "object") return;
+    const toNum = (value: unknown) => {
+      if (value === null || value === undefined || value === "") return null;
+      const numeric = Number(value);
+      return Number.isFinite(numeric) ? numeric : null;
+    };
+    const entry = {
+      ts: Date.now(),
+      cpuLoad: toNum(sample.cpu_load),
+      ramUsed: toNum(sample.ram_used),
+      cpuTemp: toNum(sample.cpu_temp),
+    };
+    const history = healthHistoryRef.current;
+    history.push(entry);
+    const cutoff = entry.ts - HEALTH_WINDOW_MS;
+    while (history.length > 0 && history[0].ts < cutoff) history.shift();
+    if (history.length > HEALTH_SAMPLE_LIMIT) history.splice(0, history.length - HEALTH_SAMPLE_LIMIT);
+
+    const avg = (key: "cpuLoad" | "ramUsed" | "cpuTemp") => {
+      let total = 0;
+      let count = 0;
+      for (const item of history) {
+        const value = item[key];
+        if (value !== null) {
+          total += value;
+          count += 1;
+        }
+      }
+      return count > 0 ? Number((total / count).toFixed(1)) : null;
+    };
+
+    setSystemHealthAverage({
+      samples: history.length,
+      windowSeconds: HEALTH_WINDOW_MS / 1000,
+      cpuLoad: avg("cpuLoad"),
+      ramUsed: avg("ramUsed"),
+      cpuTemp: avg("cpuTemp"),
+    });
+  }, []);
 
   useEffect(() => {
     if (typeof window !== 'undefined') {
@@ -161,6 +216,7 @@ export function NexusProvider({ children }: { children: React.ReactNode }) {
       if (health.status === "fulfilled") {
         setSystemHealth(health.value.payload);
         setStatus(health.value.header?.status || "STABLE");
+        recordHealthSample(health.value.payload);
         addLog(health.value, "HARDWARE_PULSE");
         anySuccess = true;
       }
@@ -332,8 +388,8 @@ export function NexusProvider({ children }: { children: React.ReactNode }) {
   }, [fetchData]);
 
   return (
-    <NexusContext.Provider value={{ 
-      state, systemHealth, knowledgeGraph, fileChanges, fileTree, nexusLogs,
+    <NexusContext.Provider value={{
+      state, systemHealth, systemHealthAverage, knowledgeGraph, fileChanges, fileTree, nexusLogs,
       lastUpdate, url, nexusKey, status, fileContent, consecutiveFailures, workingDirectory,
       setFileContent, refreshTelemetry: fetchData, authorize, sendCommand, readFile, writeFile, deleteFile, renameFile, killProcess, addManualLog, clearLogs, updateUrl, updateKey
     }}>

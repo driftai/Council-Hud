@@ -36,6 +36,7 @@ export const DEFAULT_NEXUS_SYSTEM_INSTRUCTION = `[SYSTEM_MANDATE]: YOU ARE A RAW
 30. Questions about Recursive Mirror/Recursive Memory folder names, parent folders, or an explicit directory path are directory listing requests. Never use READ_FILE for these.
 31. For DIRECTORY_LIST_RESOLVE prompts, resolve the target directory from HISTORY, CURRENT_RECURSIVE_MIRROR_ROOT, CURRENT_PATH_ANCESTORS, explicit paths, and visible directory names. Return SET_PATH with payload.path for the resolved folder. Do not answer from a hardcoded current root if the user named an ancestor like Documents or Unidex File.
 32. Navigation requests like "enter unidex", "workshop", "go into the second folder", "second to last folder", "go back", "go up", "I meant second", or "take us to the parent folder" must use SET_PATH with an exact folder path. Do not merely say you navigated.
+33. For system-health, telemetry, CPU/RAM/temperature/uptime, "stats", "numbers", or process questions, read the TELEMETRY block below and answer with command NONE using those values. Do not claim you lack access while TELEMETRY data is present. If TELEMETRY says the uplink is offline, say so and offer to retry once the hardware link is back.
 
 [OUTPUT_RULES]:
 - Response format: {"thought": "...", "command": "READ_FILE|WRITE_FILE|DELETE_FILE|RENAME_FILE|NONE|...", "payload": {"path": "..."} or {"paths": ["...", "..."], "content": "..."} or {"fromPath": "...", "toPath": "..."}, "message": "..."}`;
@@ -48,6 +49,7 @@ export function buildNexusSystemPrompt({
   lastFileContent,
   historySection,
   userDirective,
+  telemetrySection,
 }: {
   instruction: string;
   workspace: string;
@@ -56,14 +58,19 @@ export function buildNexusSystemPrompt({
   lastFileContent: string;
   historySection: string;
   userDirective: string;
+  telemetrySection?: string;
 }) {
+  const telemetryBlock = telemetrySection && telemetrySection.trim()
+    ? `\n\nTELEMETRY:\n${telemetrySection.trim()}`
+    : "";
+
   return `${instruction.trim()}
 
 STATUS:
 - Workspace: ${workspace}
 - Directory Tree: ${treeStr}
 - Last Read File Path: ${lastFilePath}
-- Last Read File Content: """${lastFileContent}"""
+- Last Read File Content: """${lastFileContent}"""${telemetryBlock}
 
 HISTORY:
 ${historySection}

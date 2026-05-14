@@ -29,6 +29,8 @@ const NexusCommandInputSchema = z.object({
     processes: z.array(z.any()).optional(),
     fileTree: z.any().optional(),
     systemHealth: z.any().optional(),
+    systemHealthAverage: z.any().optional(),
+    connectionState: z.string().optional(),
     currentUrl: z.string().optional(),
     workingDirectory: z.string().optional(),
     lastReadFile: z.object({
@@ -190,6 +192,89 @@ function normalizeCommand(value: unknown): NexusCommandOutput["command"] {
     : "NONE";
 }
 
+function formatNumber(value: unknown, suffix = "") {
+  if (value === null || value === undefined || value === "") return null;
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return null;
+  const rounded = Math.abs(numeric) >= 100 ? numeric.toFixed(0) : numeric.toFixed(1);
+  const cleaned = rounded.replace(/\.0$/, "");
+  return `${cleaned}${suffix}`;
+}
+
+function formatUptime(secondsRaw: unknown) {
+  const secondsNum = Number(secondsRaw);
+  if (!Number.isFinite(secondsNum) || secondsNum <= 0) return null;
+  const seconds = Math.floor(secondsNum);
+  const days = Math.floor(seconds / 86400);
+  const hours = Math.floor((seconds % 86400) / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  if (days > 0) return `${days}d ${hours}h ${minutes}m`;
+  if (hours > 0) return `${hours}h ${minutes}m`;
+  return `${minutes}m`;
+}
+
+function summarizeProcesses(processes: unknown) {
+  if (!Array.isArray(processes) || processes.length === 0) return null;
+  const ranked = processes
+    .filter((proc): proc is Record<string, any> => Boolean(proc) && typeof proc === "object")
+    .map((proc) => ({
+      name: String(proc.name || proc.title || proc.label || proc.id || "process"),
+      cpu: Number.isFinite(Number(proc.cpu)) ? Number(proc.cpu) : null,
+      memory: Number.isFinite(Number(proc.memory ?? proc.mem)) ? Number(proc.memory ?? proc.mem) : null,
+    }))
+    .sort((a, b) => (b.cpu ?? 0) - (a.cpu ?? 0))
+    .slice(0, 6)
+    .map((proc) => {
+      const cpu = proc.cpu !== null ? `cpu ${formatNumber(proc.cpu, "%")}` : "";
+      const mem = proc.memory !== null ? `mem ${formatNumber(proc.memory, "%")}` : "";
+      const tail = [cpu, mem].filter(Boolean).join(", ");
+      return tail ? `${proc.name} (${tail})` : proc.name;
+    });
+  if (ranked.length === 0) return null;
+  return ranked.join(", ");
+}
+
+function formatTelemetrySection(context: NexusCommandInput["context"]) {
+  const lines: string[] = [];
+  const health = (context.systemHealth || {}) as Record<string, any>;
+  const average = (context.systemHealthAverage || {}) as Record<string, any>;
+  const hasHealth = health && Object.keys(health).length > 0;
+
+  if (context.connectionState) lines.push(`- Connection state: ${context.connectionState}`);
+  if (context.currentUrl) lines.push(`- Bridge URL: ${context.currentUrl}`);
+
+  if (hasHealth) {
+    const cpu = formatNumber(health.cpu_load, "%");
+    const ram = formatNumber(health.ram_used, "%");
+    const temp = formatNumber(health.cpu_temp, "°C");
+    const uptime = formatUptime(health.uptime);
+    if (cpu) {
+      const avg = formatNumber(average.cpuLoad, "%");
+      lines.push(`- CPU load: ${cpu}${avg ? ` (avg ${avg} over last ${average.windowSeconds || 60}s)` : ""}`);
+    }
+    if (ram) {
+      const avg = formatNumber(average.ramUsed, "%");
+      lines.push(`- RAM used: ${ram}${avg ? ` (avg ${avg} over last ${average.windowSeconds || 60}s)` : ""}`);
+    }
+    if (temp) {
+      const avg = formatNumber(average.cpuTemp, "°C");
+      const source = typeof health.cpu_temp_source === "string" ? health.cpu_temp_source : "";
+      lines.push(`- CPU temp: ${temp}${avg ? ` (avg ${avg} over last ${average.windowSeconds || 60}s)` : ""}${source ? ` [${source}]` : ""}`);
+    }
+    if (uptime) lines.push(`- System uptime: ${uptime}`);
+    if (typeof health.status === "string") lines.push(`- Node status: ${health.status}`);
+  } else {
+    lines.push("- Telemetry: hardware uplink offline.");
+  }
+
+  const processSummary = summarizeProcesses(context.processes);
+  if (processSummary) lines.push(`- Top processes: ${processSummary}`);
+
+  lines.push("- Use these numbers when the user asks for system health, averages, temperature, load, or running processes. Do not say you lack access while telemetry is present here.");
+
+  return lines.join("\n");
+}
+
 function normalizeCommandOutput(parsed: any): NexusCommandOutput {
   const payload = parsed?.payload && typeof parsed.payload === "object" && !Array.isArray(parsed.payload)
     ? normalizePayloadPaths(parsed.payload)
@@ -220,6 +305,8 @@ export async function nexusCommand(input: NexusCommandInput): Promise<NexusComma
     ? (input.history || []).map(m => `- ${m.role === 'model' ? 'Nexus_Op' : 'User'}: ${m.content}`).join('\n')
     : "No previous conversation history.";
 
+  const telemetrySection = formatTelemetrySection(input.context);
+
   const systemInstruction = getRuntimeTextValue(NEXUS_SYSTEM_INSTRUCTION_KEY) || DEFAULT_NEXUS_SYSTEM_INSTRUCTION;
   const systemPrompt = buildNexusSystemPrompt({
     instruction: systemInstruction,
@@ -229,6 +316,7 @@ export async function nexusCommand(input: NexusCommandInput): Promise<NexusComma
     lastFileContent,
     historySection,
     userDirective: input.prompt,
+    telemetrySection,
   });
 
   for (let attempt = 0; attempt <= RATE_LIMIT_RETRIES; attempt++) {
