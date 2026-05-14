@@ -95,11 +95,22 @@ export function KnowledgeGraph() {
   const connected = state === "LINKED" || state === "SYNCING" || state === "RE-SYNCING";
   const nodes: ProcessNode[] = useMemo(() => {
     const source = Array.isArray(knowledgeGraph?.nodes) ? knowledgeGraph.nodes : [];
-    return source.slice(0, 8).map((node: any) => ({
-      id: toNumber(node.id),
-      name: String(node.name ?? "unknown"),
-      usage: toNumber(node.usage),
-    }));
+    // System Idle Process (PID 0) always pegs the top of Windows process tables but isn't
+    // real work, so it crowds out anything meaningful. Drop it before slicing.
+    return source
+      .filter((node: any) => {
+        const id = toNumber(node?.id);
+        const name = String(node?.name ?? "").toLowerCase();
+        if (id === 0) return false;
+        if (name === "system idle process" || name === "idle") return false;
+        return true;
+      })
+      .slice(0, 8)
+      .map((node: any) => ({
+        id: toNumber(node.id),
+        name: String(node.name ?? "unknown"),
+        usage: toNumber(node.usage),
+      }));
   }, [knowledgeGraph]);
   const totalThreads = toNumber(knowledgeGraph?.total_threads);
   const activeNode = nodes.find((node) => node.id === activeId) || nodes[0] || null;

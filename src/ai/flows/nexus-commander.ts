@@ -219,9 +219,16 @@ function summarizeProcesses(processes: unknown) {
     .filter((proc): proc is Record<string, any> => Boolean(proc) && typeof proc === "object")
     .map((proc) => ({
       name: String(proc.name || proc.title || proc.label || proc.id || "process"),
-      cpu: Number.isFinite(Number(proc.cpu)) ? Number(proc.cpu) : null,
+      pid: Number.isFinite(Number(proc.pid ?? proc.id)) ? Number(proc.pid ?? proc.id) : null,
+      cpu: Number.isFinite(Number(proc.usage ?? proc.cpu)) ? Number(proc.usage ?? proc.cpu) : null,
       memory: Number.isFinite(Number(proc.memory ?? proc.mem)) ? Number(proc.memory ?? proc.mem) : null,
     }))
+    .filter((proc) => {
+      const name = proc.name.toLowerCase();
+      if (proc.pid === 0) return false;
+      if (name === "system idle process" || name === "idle") return false;
+      return true;
+    })
     .sort((a, b) => (b.cpu ?? 0) - (a.cpu ?? 0))
     .slice(0, 6)
     .map((proc) => {

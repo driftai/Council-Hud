@@ -13,14 +13,20 @@ function toNumber(value: unknown) {
 }
 
 export function SystemHealth() {
-  const { state, systemHealth, url, status } = useNexus();
-  
+  const { state, systemHealth, systemHealthAverage, url, status } = useNexus();
+
   const connected = state === "LINKED" || state === "SYNCING" || state === "RE-SYNCING";
   const stats = systemHealth || {};
   const cpuLoad = toNumber(stats.cpu_load);
   const ramUsed = toNumber(stats.ram_used);
   const cpuTemp = toNumber(stats.cpu_temp);
   const uptime = toNumber(stats.uptime);
+  const cpuTempSourceRaw = typeof stats.cpu_temp_source === "string" ? stats.cpu_temp_source : "";
+  const cpuTempSensorName = cpuTempSourceRaw.split(":").pop() || cpuTempSourceRaw;
+  const isPeakSensor = /core\s*max|max(?!\w)|hot\s*spot|junction/i.test(cpuTempSensorName);
+  const avgCpuTemp = systemHealthAverage?.cpuTemp ?? null;
+  const tempCritical = (cpuTemp ?? 0) >= (isPeakSensor ? 105 : 95);
+  const tempWarn = (cpuTemp ?? 0) >= (isPeakSensor ? 95 : 85);
   const isDegraded = status === "DEGRADED" || state === "RE-SYNCING";
 
   const isHighLoad = (cpuLoad ?? 0) > 50;
@@ -107,8 +113,16 @@ export function SystemHealth() {
           <div className="text-center">
             <p className="font-mono-readout text-[9px] text-muted-foreground mb-1">CORE_TEMP</p>
             <div className="flex items-center justify-center gap-1">
-               <Thermometer className={cn("w-3 h-3", (cpuTemp ?? 0) > 70 ? "text-destructive animate-bounce" : "text-destructive/80")} />
-               <p className="text-lg font-bold font-mono text-foreground">
+               <Thermometer className={cn(
+                 "w-3 h-3",
+                 tempCritical ? "text-destructive animate-bounce"
+                 : tempWarn ? "text-yellow-400"
+                 : "text-destructive/60"
+               )} />
+               <p className={cn(
+                 "text-lg font-bold font-mono",
+                 tempCritical ? "text-destructive" : tempWarn ? "text-yellow-400" : "text-foreground"
+               )}>
                 {connected && cpuTemp !== null ? (
                   <>
                     {cpuTemp}<span className="text-[10px] ml-0.5">°C</span>
@@ -118,6 +132,12 @@ export function SystemHealth() {
                 )}
                </p>
             </div>
+            {connected && (cpuTempSensorName || avgCpuTemp !== null) && (
+              <p className="mt-1 font-mono text-[8px] uppercase tracking-wider text-muted-foreground/80" title={cpuTempSourceRaw || undefined}>
+                {cpuTempSensorName ? `${cpuTempSensorName}${isPeakSensor ? " · peak" : ""}` : ""}
+                {avgCpuTemp !== null ? `${cpuTempSensorName ? " · " : ""}1m avg ${avgCpuTemp}°C` : ""}
+              </p>
+            )}
           </div>
           <div className="text-center">
             <p className="font-mono-readout text-[9px] text-muted-foreground mb-1">SYSTEM_UPTIME</p>

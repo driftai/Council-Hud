@@ -210,10 +210,15 @@ function scoreTemperatureSensor(sensor) {
     let score = 0;
     if (identifier.includes('/intelcpu/') || identifier.includes('/amdcpu/')) score += 30;
     if (combined.includes('cpu')) score += 15;
-    if (combined.includes('package')) score += 12;
+    // Prefer steady-state readings (average / package) over alarming peaks (core max). Core Max
+    // is intentionally a per-sample maximum and is what was reading 98–100°C on the operator's laptop
+    // even though Core Average sat near 84°C. Keep it positive but well below averages.
+    if (combined.includes('average') || /\bavg\b/.test(combined)) score += 20;
+    if (combined.includes('package')) score += 15;
     if (combined.includes('tctl') || combined.includes('tdie')) score += 12;
-    if (combined.includes('core max')) score += 10;
+    if (combined.includes('core max')) score += 2;
     if (combined.includes('core')) score += 6;
+    if (combined.includes('distance to tjmax')) score -= 40;
     if (combined.includes('gpu')) score -= 30;
     if (combined.includes('nvme') || combined.includes('ssd') || combined.includes('hdd')) score -= 25;
     if (combined.includes('motherboard') || combined.includes('chipset')) score -= 10;

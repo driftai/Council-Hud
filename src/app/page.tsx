@@ -60,6 +60,7 @@ export default function Home() {
     knowledgeGraph,
     lastUpdate,
     refreshTelemetry,
+    workingDirectory,
   } = useNexus();
   const [tempUrl, setTempUrl] = useState(url);
   const [tempKey, setTempKey] = useState(nexusKey);
@@ -873,7 +874,9 @@ export default function Home() {
               )} /> 
               {state}
             </span>
-            <span className="hidden sm:inline">LOC: 37.7749° N, 122.4194° W</span>
+            <span className="hidden sm:inline truncate max-w-[420px]" title={workingDirectory || "Nexus root"}>
+              CWD: {workingDirectory ? workingDirectory.replace(/\\/g, "/").replace(/\/+$/, "") : "Nexus root"}
+            </span>
             <span className="hidden sm:inline text-primary/60 font-bold">AI_OPERATOR_ACTIVE</span>
         </div>
         <div className="flex items-center gap-4 font-mono-readout text-[8px] text-muted-foreground">
