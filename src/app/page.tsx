@@ -777,46 +777,61 @@ export default function Home() {
         </div>
       </header>
 
-      <div className="p-4 md:p-6 lg:p-8 max-w-[1800px] mx-auto pb-20">
+      <div className="p-4 md:p-6 lg:p-8 max-w-[2200px] mx-auto pb-20">
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-12 gap-6">
-          <div className="lg:col-span-3 space-y-6">
+          <div className="lg:col-span-3 xl:col-span-3 2xl:col-span-3 space-y-6">
             <SystemHealth />
-            <button
-              type="button"
-              onClick={handleTurboSync}
-              disabled={isTurboSyncing || state === "OFFLINE"}
-              className="w-full p-6 rounded-xl bg-gradient-to-br from-primary/20 to-transparent border border-primary/10 group cursor-pointer hover:border-primary/40 transition-all text-left disabled:cursor-not-allowed disabled:opacity-50"
-            >
-                {isTurboSyncing ? (
-                  <RefreshCcw className="w-8 h-8 text-primary mb-2 animate-spin" />
+            <DashboardCard
+              title="Turbo Sync"
+              subtitle="Force Sensor Refresh"
+              headerAction={
+                isTurboSyncing ? (
+                  <RefreshCcw className="w-4 h-4 text-primary animate-spin" />
                 ) : (
-                  <Zap className="w-8 h-8 text-primary mb-2 group-hover:scale-110 transition-transform" />
-                )}
-                <h3 className="font-headline font-bold text-sm">Turbo Sync</h3>
-                <p className="text-xs text-muted-foreground mt-1">
-                  {isTurboSyncing ? "Pulling live Nexus packets..." : "Force immediate Nexus sensor refresh."}
+                  <Zap className="w-4 h-4 text-primary" />
+                )
+              }
+            >
+              <div className="flex flex-col gap-4">
+                <p className="font-mono text-xs leading-relaxed text-muted-foreground">
+                  {isTurboSyncing
+                    ? "Pulling live Nexus packets..."
+                    : "Force an immediate Nexus telemetry pull. Useful when the auto-pulse looks stale."}
                 </p>
-                <div className="mt-4 grid grid-cols-3 gap-2 font-mono text-[9px] uppercase">
-                  <span className="rounded border border-white/10 bg-black/20 px-2 py-1 text-primary">CPU {cpuLoad}%</span>
-                  <span className="rounded border border-white/10 bg-black/20 px-2 py-1 text-secondary">RAM {ramUsed}%</span>
-                  <span className="rounded border border-white/10 bg-black/20 px-2 py-1 text-muted-foreground">PID {totalThreads}</span>
+                <div className="grid grid-cols-3 gap-2 font-mono text-[10px] uppercase">
+                  <span className="rounded border border-primary/30 bg-primary/5 px-2 py-1.5 text-center text-primary">
+                    <span className="block text-[8px] text-primary/70">CPU</span>
+                    <span className="font-bold">{cpuLoad}%</span>
+                  </span>
+                  <span className="rounded border border-secondary/30 bg-secondary/5 px-2 py-1.5 text-center text-secondary">
+                    <span className="block text-[8px] text-secondary/70">RAM</span>
+                    <span className="font-bold">{ramUsed}%</span>
+                  </span>
+                  <span className="rounded border border-white/10 bg-black/20 px-2 py-1.5 text-center text-foreground/80">
+                    <span className="block text-[8px] text-muted-foreground">PID</span>
+                    <span className="font-bold">{totalThreads}</span>
+                  </span>
                 </div>
-            </button>
-          </div>
-
-          <div className="lg:col-span-6 space-y-6">
-            <NeuralCommand />
-            <NeuralVisualizer />
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                <KnowledgeGraph />
-                <NexusLogs />
-            </div>
-          </div>
-
-          <div className="lg:col-span-3 space-y-6">
-            <AgentRoster />
-            <CouncilComms />
-            <SmartFallback />
+                <button
+                  type="button"
+                  onClick={handleTurboSync}
+                  disabled={isTurboSyncing || state === "OFFLINE"}
+                  className="flex items-center justify-center gap-2 rounded-lg border border-primary/30 bg-gradient-to-br from-primary/20 to-primary/5 px-4 py-2.5 font-mono text-[11px] font-bold uppercase tracking-widest text-primary transition-all hover:border-primary/60 hover:from-primary/30 hover:to-primary/10 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-primary/30 disabled:hover:from-primary/20 disabled:hover:to-primary/5"
+                >
+                  {isTurboSyncing ? (
+                    <>
+                      <RefreshCcw className="h-3.5 w-3.5 animate-spin" />
+                      <span>Syncing</span>
+                    </>
+                  ) : (
+                    <>
+                      <Zap className="h-3.5 w-3.5" />
+                      <span>Trigger Sync</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </DashboardCard>
             <FileWatcher />
             <DashboardCard title="Uplink Telemetry" subtitle="Signal Health">
                 <div className="flex flex-col items-center justify-center py-6">
@@ -832,8 +847,8 @@ export default function Home() {
                         <div className="flex items-center justify-between text-[10px] font-mono">
                             <span className="text-muted-foreground">Uplink Status</span>
                             <span className={cn(
-                              "font-bold", 
-                              state === "LINKED" ? "text-secondary" : 
+                              "font-bold",
+                              state === "LINKED" ? "text-secondary" :
                               state === "RE-SYNCING" ? "text-yellow-500" :
                               "text-destructive"
                             )}>
@@ -849,18 +864,35 @@ export default function Home() {
                             <span className="text-secondary">{totalThreads}</span>
                         </div>
                         <div className="w-full bg-white/5 h-1 rounded-full overflow-hidden">
-                          <div 
+                          <div
                             className={cn(
                               "h-full transition-all duration-500",
-                              consecutiveFailures === 0 ? "bg-secondary w-full" : 
-                              state === "RE-SYNCING" ? "bg-yellow-500 w-1/2" : 
+                              consecutiveFailures === 0 ? "bg-secondary w-full" :
+                              state === "RE-SYNCING" ? "bg-yellow-500 w-1/2" :
                               "bg-destructive w-0"
-                            )} 
+                            )}
                           />
                         </div>
                     </div>
                 </div>
             </DashboardCard>
+          </div>
+
+          <div className="lg:col-span-6 xl:col-span-5 2xl:col-span-5 space-y-6">
+            <NeuralCommand />
+            <NeuralVisualizer />
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <KnowledgeGraph />
+                <NexusLogs />
+            </div>
+          </div>
+
+          <div className="lg:col-span-3 xl:col-span-4 2xl:col-span-4 space-y-6 xl:grid xl:grid-cols-2 xl:gap-6 xl:space-y-0 xl:items-start">
+            <AgentRoster />
+            <SmartFallback />
+            <div className="xl:col-span-2">
+              <CouncilComms />
+            </div>
           </div>
         </div>
       </div>
