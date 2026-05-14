@@ -3,6 +3,7 @@
 import { SystemHealth } from "@/components/dashboard/SystemHealth";
 import { AgentRoster } from "@/components/dashboard/AgentRoster";
 import { CouncilComms } from "@/components/dashboard/CouncilComms";
+import { SmartFallback } from "@/components/dashboard/SmartFallback";
 import { NeuralVisualizer } from "@/components/dashboard/NeuralVisualizer";
 import { KnowledgeGraph } from "@/components/dashboard/KnowledgeGraph";
 import { FileWatcher } from "@/components/dashboard/FileWatcher";
@@ -815,6 +816,7 @@ export default function Home() {
           <div className="lg:col-span-3 space-y-6">
             <AgentRoster />
             <CouncilComms />
+            <SmartFallback />
             <FileWatcher />
             <DashboardCard title="Uplink Telemetry" subtitle="Signal Health">
                 <div className="flex flex-col items-center justify-center py-6">
