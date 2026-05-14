@@ -16,6 +16,7 @@ import {
   DEFAULT_NEXUS_SYSTEM_INSTRUCTION,
   NEXUS_SYSTEM_INSTRUCTION_KEY,
 } from '@/lib/nexus-system-instruction';
+import { recordModelOutcome, resolveRoutableModel } from '@/lib/smart-fallback';
 
 const MessageSchema = z.object({
   role: z.enum(['user', 'model']),
@@ -298,7 +299,7 @@ function normalizeCommandOutput(parsed: any): NexusCommandOutput {
 export async function nexusCommand(input: NexusCommandInput): Promise<NexusCommandOutput> {
   const NVIDIA_URL = "https://integrate.api.nvidia.com/v1/chat/completions";
   const apiKey = getRuntimeEnvValue("NVIDIA_API_KEY");
-  const selectedModel = getRuntimeEnvValue("NVIDIA_MODEL") || DEFAULT_NVIDIA_MODEL;
+  const preferredModel = getRuntimeEnvValue("NVIDIA_MODEL") || DEFAULT_NVIDIA_MODEL;
 
   if (!apiKey) {
     throw new Error("NVIDIA_API_KEY is not set.");
@@ -326,7 +327,18 @@ export async function nexusCommand(input: NexusCommandInput): Promise<NexusComma
     telemetrySection,
   });
 
+  // Smart-fallback pre-flight: ask the engine whether our preferred model is currently routable.
+  // When it's not (circuit open with cooldown remaining), the engine hands us a healthy fallback.
+  // If the engine is unreachable, we proceed with the user's choice.
+  const initial = await resolveRoutableModel(preferredModel);
+  let currentModel = initial.model;
+  const triedModels = new Set<string>([currentModel]);
+  if (initial.source === "fallback") {
+    console.info(`[smart-fallback] '${preferredModel}' is ${initial.routability?.circuit_state} (${initial.routability?.cooldown_remaining}s cooldown) — swapping to '${currentModel}' for this turn.`);
+  }
+
   for (let attempt = 0; attempt <= RATE_LIMIT_RETRIES; attempt++) {
+    const startedAt = Date.now();
     try {
       const response = await fetch(NVIDIA_URL, {
         method: "POST",
@@ -335,7 +347,7 @@ export async function nexusCommand(input: NexusCommandInput): Promise<NexusComma
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          model: selectedModel,
+          model: currentModel,
           messages: [
             { role: "system", content: systemPrompt },
             { role: "user", content: input.prompt }
@@ -350,16 +362,27 @@ export async function nexusCommand(input: NexusCommandInput): Promise<NexusComma
       try {
         json = JSON.parse(responseText);
       } catch {
+        recordModelOutcome(currentModel, "error", `non_json_${response.status}`);
         throw new Error(`Neural Bridge returned non-JSON response (${response.status}).`);
       }
       if (!response.ok) {
-        throw new Error(json?.error?.message || `Neural Bridge HTTP ${response.status}.`);
+        const errMsg = json?.error?.message || `Neural Bridge HTTP ${response.status}.`;
+        if (response.status === 429 || /rate.?limit|too many requests/i.test(errMsg)) {
+          recordModelOutcome(currentModel, "rate_limit", "rate_limit");
+          throw new Error(`429 rate limit: ${errMsg}`);
+        }
+        recordModelOutcome(currentModel, "error", `http_${response.status}`);
+        throw new Error(errMsg);
       }
       const aiContent = json.choices?.[0]?.message?.content?.trim();
 
       if (!aiContent) {
+        recordModelOutcome(currentModel, "error", "empty_response");
         throw new Error(json?.error?.message || "Empty response from Neural Bridge.");
       }
+
+      // Healthy response — feed latency back to the engine so it scores this model fairly.
+      recordModelOutcome(currentModel, "success", Date.now() - startedAt);
 
       const candidates = collectJsonCandidates(aiContent);
       if (candidates.length === 0) {
@@ -388,7 +411,17 @@ export async function nexusCommand(input: NexusCommandInput): Promise<NexusComma
     } catch (error: any) {
       const message = error.message || "Network Timeout";
       const rateLimited = /429|rate limit/i.test(message);
+
       if (rateLimited && attempt < RATE_LIMIT_RETRIES) {
+        // Don't pound the same model — ask the engine for a healthier one we haven't tried yet.
+        const swap = await resolveRoutableModel(currentModel);
+        if (swap.source === "fallback" && swap.model && !triedModels.has(swap.model)) {
+          console.info(`[smart-fallback] 429 on '${currentModel}' — switching to '${swap.model}' for retry.`);
+          currentModel = swap.model;
+          triedModels.add(currentModel);
+          continue;
+        }
+        // Engine had nothing fresh — backoff and retry the same model as last resort.
         await delay(800 * Math.pow(2, attempt));
         continue;
       }
