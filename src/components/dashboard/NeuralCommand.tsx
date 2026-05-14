@@ -2452,20 +2452,7 @@ For emoji-only requests, payload.content must contain visible emoji only plus wh
       return;
     }
 
-    if (!isSilent && wantsLocalFileReadRequest(input, localHistory)) {
-      setIsLoading(true);
-      try {
-        const handledHistory = await handleLocalFileReadRequest(input, localHistory);
-        if (handledHistory) return;
-      } catch (error: any) {
-        const errorMsg = `Read failed: ${error.message || "Unknown error"}`;
-        setMessages(prev => [...prev, { role: 'model', content: errorMsg, timestamp: Date.now() }]);
-        addManualLog("ERROR", errorMsg);
-        return;
-      } finally {
-        setIsLoading(false);
-      }
-    }
+    // File-read directives always route through the NVIDIA bridge; no local short-circuit.
 
     if (!isSilent && parseCodewordAssignment(input) && wantsEditDirective(input)) {
       setIsLoading(true);
@@ -2521,27 +2508,7 @@ For emoji-only requests, payload.content must contain visible emoji only plus wh
           lastReadFile: contextReadFile
         }
       });
-      const inferredReadPaths = inferReadPathsFromContext(rootDirective, localHistory, fileTree);
-
-      if (isEmptyBridgeResponse(result.message) && inferredReadPaths.length > 0 && shouldAnswerDirectlyFromRead(rootDirective, shouldRedactTurn)) {
-        result = {
-          thought: "Local fallback recovered file-read intent from visible file tree context.",
-          command: "READ_FILE",
-          payload: inferredReadPaths.length > 1 ? { paths: inferredReadPaths } : { path: inferredReadPaths[0] },
-          message: inferredReadPaths.length > 1
-            ? `Reading ${inferredReadPaths.length} files from local context.`
-            : `Reading ${getFileName(inferredReadPaths[0])} from local context.`,
-        };
-      } else if (result.command === "NONE" && inferredReadPaths.length > 0 && shouldAnswerDirectlyFromRead(rootDirective, shouldRedactTurn)) {
-        result = {
-          thought: "Local fallback promoted visible file-read intent to READ_FILE.",
-          command: "READ_FILE",
-          payload: inferredReadPaths.length > 1 ? { paths: inferredReadPaths } : { path: inferredReadPaths[0] },
-          message: inferredReadPaths.length > 1
-            ? `Reading ${inferredReadPaths.length} requested files.`
-            : `Reading ${getFileName(inferredReadPaths[0])}.`,
-        };
-      }
+      // NVIDIA is the sole intent decider — no local synthesis of READ_FILE intent here.
       const explicitlyRequestedFilePaths = getRequestedFilePaths(rootDirective, localHistory, fileTree);
       if (result.command === "READ_FILE" && explicitlyRequestedFilePaths.length > 0) {
         const clampedPaths = explicitlyRequestedFilePaths.slice(0, 5);
@@ -2619,13 +2586,15 @@ For emoji-only requests, payload.content must contain visible emoji only plus wh
             readSnapshots.push(readSnapshot);
             setLastAgentReadFile(readSnapshot);
             rememberFileEvent("READ", readPath, content);
-            const readResponse: ChatMessage = {
-              role: 'model',
-              content: buildFileReadResponse(rootDirective, readPath, content, openInspector, shouldRedactTurn, displaySensitiveText),
-              timestamp: Date.now()
-            };
-            localHistory = [...localHistory, readResponse];
-            setMessages([...localHistory]);
+            if (openInspector) {
+              const readResponse: ChatMessage = {
+                role: 'model',
+                content: buildFileReadResponse(rootDirective, readPath, content, openInspector, shouldRedactTurn, displaySensitiveText),
+                timestamp: Date.now()
+              };
+              localHistory = [...localHistory, readResponse];
+              setMessages([...localHistory]);
+            }
           }
 
           const lastReadSnapshot = readSnapshots[readSnapshots.length - 1];
@@ -2655,10 +2624,10 @@ For emoji-only requests, payload.content must contain visible emoji only plus wh
             }
           }
 
-          const shouldContinueForMoreFiles = wantsMultipleFileRead(rootDirective)
-            && readPaths.length === 1
-            && readDepth < 4;
-          if (openInspector || (!wantsEditDirective(rootDirective) && shouldAnswerDirectlyFromRead(rootDirective, shouldRedactTurn) && !shouldContinueForMoreFiles)) {
+          // After a successful read, always hand the content back to NVIDIA so the LLM
+          // formulates the user-facing answer. Only short-circuit when the file was
+          // routed to Remote_Inspector — the inspector view IS the answer there.
+          if (openInspector) {
             return;
           }
 
