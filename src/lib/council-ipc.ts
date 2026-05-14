@@ -4,7 +4,10 @@ import { spawn } from "node:child_process";
 import { promises as fs } from "node:fs";
 
 const WSL_DISTRO = process.env.COUNCIL_WSL_DISTRO || "Ubuntu";
-const WSL_WORKSPACE = "/home/linux-user/.openclaw/workspace";
+const WSL_USER = process.env.COUNCIL_WSL_USER || "linux-user";
+const WSL_WORKSPACE = process.env.COUNCIL_WSL_WORKSPACE || "/home/linux-user/.openclaw/workspace";
+const WSL_HUB_SCRIPT = process.env.COUNCIL_WSL_HUB_SCRIPT
+  || "/home/linux-user/.npm-global/lib/node_modules/xihe-jianmu-ipc/hub.mjs";
 const HUB_URL = process.env.COUNCIL_HUB_URL || "http://10.255.255.254:3179";
 const WORKSPACE_UNC = process.env.COUNCIL_WORKSPACE_UNC
   || "\\\\wsl.localhost\\Ubuntu\\home\\linux-user\\.openclaw\\workspace";
@@ -287,4 +290,160 @@ with urllib.request.urlopen(request, timeout=5) as response:
 `;
   const raw = await runWslPython(script, payload, 8000);
   return JSON.parse(raw || "{}");
+}
+
+// === IPC stack bootstrap ===
+// Local-only orchestration helpers that drive the WSL-side IPC hub + bridges. The HTTP routes
+// using these guard with canUseLocalCouncilApi, so this never gets reached from a remote browser.
+// Responses below are deliberately sanitised — no absolute paths, no auth tokens, no raw stderr.
+
+const IPC_BRIDGE_TARGETS = [
+  { agent: "agent-a", launcher: "council-agent-a" as const, fallbackScript: "agent-a-bridge.py" },
+  { agent: "agent-b", launcher: "council-agent-b" as const, fallbackScript: "agent-b-bridge.py" },
+  { agent: "agent-c", launcher: "council-agent-c" as const, fallbackScript: "agent-c-bridge.py" },
+  // council-agent-d is a send helper rather than a launcher in the upstream scripts dir, so
+  // we always use the daemon path for vesper.
+  { agent: "agent-d", launcher: null, fallbackScript: "agent-d-bridge.py" },
+] as const;
+
+function runWslBash(commands: string[], timeoutMs = 10000) {
+  return new Promise<{ stdout: string; stderr: string; code: number | null }>((resolve) => {
+    const child = spawn(
+      "wsl.exe",
+      ["-d", WSL_DISTRO, "-u", WSL_USER, "--", "bash", "-lc", commands.join("; ")],
+      { windowsHide: true }
+    );
+    let stdout = "";
+    let stderr = "";
+    const timer = setTimeout(() => child.kill(), timeoutMs);
+    child.stdout.on("data", (chunk) => { stdout += chunk.toString(); });
+    child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
+    child.on("error", () => resolve({ stdout, stderr, code: null }));
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      resolve({ stdout, stderr, code });
+    });
+  });
+}
+
+function detachedWslBash(commands: string[]) {
+  // start_new_session-style detach: child runs independently of the wsl.exe parent so it
+  // survives once this Node handler returns to the client.
+  const child = spawn(
+    "wsl.exe",
+    ["-d", WSL_DISTRO, "-u", WSL_USER, "--", "bash", "-lc", commands.join("; ")],
+    { windowsHide: true, detached: true, stdio: "ignore" }
+  );
+  child.unref();
+}
+
+function sanitizeBootMessage(value: string) {
+  // Strip absolute WSL home paths, token-ish strings, and trim noisy duplicate spaces so the UI
+  // never surfaces filesystem layout or credential bytes.
+  return value
+    .replace(/\/home\/[A-Za-z0-9_.-]+/g, "~")
+    .replace(/Bearer\s+[A-Za-z0-9._-]+/gi, "Bearer …")
+    .replace(/(token|secret|password)[=:]\s*\S+/gi, "$1=…")
+    .replace(/\r/g, "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .slice(-20)
+    .join("\n");
+}
+
+export type IpcStackStatus = {
+  hubRunning: boolean;
+  hubReachable: boolean;
+  bridges: Array<{ agent: string; running: boolean }>;
+  notes?: string;
+};
+
+export async function getIpcStackStatus(): Promise<IpcStackStatus> {
+  // pgrep returns one line per match; we only care about counts per bridge name so we keep it cheap.
+  const probes = IPC_BRIDGE_TARGETS.map((target) => (
+    `echo --${target.agent} && pgrep -fa ${target.fallbackScript} 2>/dev/null | wc -l`
+  ));
+  const checkScript = [
+    "echo --hub-proc",
+    "pgrep -fa hub.mjs 2>/dev/null | wc -l",
+    ...probes,
+    "echo --hub-reach",
+    `curl -s -o /dev/null -w "%{http_code}" --max-time 2 ${HUB_URL.replace(/[$"`\\]/g, "")} 2>/dev/null || echo 000`,
+  ];
+  const { stdout } = await runWslBash(checkScript, 6000);
+  const sections = stdout.split(/--([\w-]+)\n/).filter(Boolean);
+  const data = new Map<string, string>();
+  for (let i = 0; i < sections.length; i += 2) {
+    const label = sections[i]?.trim();
+    const body = sections[i + 1]?.trim() || "";
+    if (label) data.set(label, body);
+  }
+
+  const hubCount = Number(data.get("hub-proc") || "0");
+  const hubReachCode = Number((data.get("hub-reach") || "000").split(/\s+/).pop());
+  const bridges = IPC_BRIDGE_TARGETS.map((target) => ({
+    agent: target.agent,
+    running: Number(data.get(target.agent) || "0") > 0,
+  }));
+
+  return {
+    hubRunning: hubCount > 0,
+    hubReachable: hubReachCode >= 200 && hubReachCode < 500,
+    bridges,
+  };
+}
+
+export async function startIpcStack(): Promise<{ ok: boolean; message: string; status: IpcStackStatus }> {
+  // Step 1: flip MCP configs back on via the upstream toggle script. Best-effort; missing script
+  // shouldn't block subsequent steps.
+  await runWslBash([
+    `bash ${WSL_WORKSPACE}/scripts/ipc-toggle.sh on 2>&1 || true`,
+  ], 15000);
+
+  // Step 2: spawn the hub as a detached process so it outlives this handler.
+  detachedWslBash([
+    `if ! pgrep -f 'hub.mjs' >/dev/null 2>&1; then nohup node ${WSL_HUB_SCRIPT} </dev/null >/dev/null 2>&1 & disown; fi`,
+  ]);
+
+  // Step 3: spawn each bridge using the council-* launcher when available, otherwise route the
+  // python script through bridge-ensure-one with an absolute path (works around the watchdog's
+  // 'scripts/scripts/...' double-prefix bug on the agent side).
+  for (const target of IPC_BRIDGE_TARGETS) {
+    const cmd = target.launcher
+      ? `${WSL_WORKSPACE}/scripts/${target.launcher} council`
+      : `python3 ${WSL_WORKSPACE}/scripts/bridge-ensure-one.py ${WSL_WORKSPACE}/scripts/${target.fallbackScript} --topic council --daemon`;
+    detachedWslBash([
+      `if ! pgrep -f '${target.fallbackScript}' >/dev/null 2>&1; then nohup ${cmd} </dev/null >/dev/null 2>&1 & disown; fi`,
+    ]);
+  }
+
+  // Step 4: give everything a moment, then probe state.
+  await new Promise((resolve) => setTimeout(resolve, 4500));
+  const status = await getIpcStackStatus();
+  const liveBridges = status.bridges.filter((bridge) => bridge.running).length;
+  return {
+    ok: status.hubReachable && liveBridges === IPC_BRIDGE_TARGETS.length,
+    message: sanitizeBootMessage(`Hub ${status.hubRunning ? "up" : "down"} · ${liveBridges}/${IPC_BRIDGE_TARGETS.length} bridges live`),
+    status,
+  };
+}
+
+export async function stopIpcStack(): Promise<{ ok: boolean; message: string; status: IpcStackStatus }> {
+  // Best-effort shutdown: try the upstream off script first (clears MCP configs), then sweep any
+  // stragglers. Either path is allowed to fail — we still report whatever the final state is.
+  const { stdout, stderr } = await runWslBash([
+    `bash ${WSL_WORKSPACE}/scripts/ipc-toggle.sh off 2>&1 || true`,
+    `pkill -f 'bridge.py' 2>/dev/null || true`,
+    `pkill -f 'hub.mjs' 2>/dev/null || true`,
+    `echo done`,
+  ], 15000);
+
+  await new Promise((resolve) => setTimeout(resolve, 1500));
+  const status = await getIpcStackStatus();
+  return {
+    ok: !status.hubRunning && status.bridges.every((bridge) => !bridge.running),
+    message: sanitizeBootMessage(stdout || stderr || "ipc stack stopped"),
+    status,
+  };
 }

@@ -4,9 +4,17 @@ import { useEffect, useMemo, useState } from "react";
 import { DashboardCard } from "./DashboardCard";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Radio, WifiOff } from "lucide-react";
+import { Power, PowerOff, Radio, RefreshCcw, WifiOff } from "lucide-react";
 import { cn } from "@/lib/utils";
+
+type IpcBridgeState = { agent: string; running: boolean };
+type IpcStackState = {
+  hubRunning: boolean;
+  hubReachable: boolean;
+  bridges: IpcBridgeState[];
+};
 
 type CouncilSession = {
   name: string;
@@ -99,6 +107,55 @@ function getModeClass(mode: CouncilSession["mode"]) {
 export function AgentRoster() {
   const [status, setStatus] = useState<CouncilStatus>({ ok: false, sessions: [] });
   const [now, setNow] = useState(Date.now());
+  const [ipcState, setIpcState] = useState<IpcStackState | null>(null);
+  const [ipcBusy, setIpcBusy] = useState<"idle" | "starting" | "stopping">("idle");
+  const [ipcError, setIpcError] = useState<string | null>(null);
+  const [confirmIntent, setConfirmIntent] = useState<"start" | "stop" | null>(null);
+
+  const loadIpcStatus = async () => {
+    try {
+      const response = await fetch("/api/council/ipc/status", { cache: "no-store" });
+      const data = await response.json().catch(() => ({}));
+      if (data?.status) {
+        setIpcState(data.status as IpcStackState);
+        setIpcError(null);
+      } else if (!response.ok) {
+        setIpcError(typeof data?.error === "string" ? data.error : "IPC probe failed");
+      }
+    } catch (error: any) {
+      setIpcError(error?.message || "IPC probe failed");
+    }
+  };
+
+  useEffect(() => {
+    loadIpcStatus();
+    const interval = setInterval(loadIpcStatus, 12000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const triggerIpc = async (intent: "start" | "stop") => {
+    setIpcBusy(intent === "start" ? "starting" : "stopping");
+    setIpcError(null);
+    try {
+      const response = await fetch(`/api/council/ipc/${intent}`, { method: "POST", cache: "no-store" });
+      const data = await response.json().catch(() => ({}));
+      if (data?.status) setIpcState(data.status as IpcStackState);
+      if (!response.ok && response.status !== 207) {
+        setIpcError(typeof data?.error === "string" ? data.error : `IPC ${intent} failed`);
+      }
+    } catch (error: any) {
+      setIpcError(error?.message || `IPC ${intent} failed`);
+    } finally {
+      setIpcBusy("idle");
+      setConfirmIntent(null);
+      void loadIpcStatus();
+    }
+  };
+
+  const ipcHubLive = Boolean(ipcState?.hubReachable);
+  const liveBridges = ipcState?.bridges.filter((b) => b.running).length ?? 0;
+  const totalBridges = ipcState?.bridges.length ?? 0;
+  const ipcAllUp = ipcHubLive && totalBridges > 0 && liveBridges === totalBridges;
 
   useEffect(() => {
     let cancelled = false;
@@ -139,13 +196,86 @@ export function AgentRoster() {
       title="Council Agents"
       subtitle="IPC Session Presence"
       headerAction={
-        status.ok ? (
-          <Radio className="h-4 w-4 animate-pulse text-secondary" />
-        ) : (
-          <WifiOff className="h-4 w-4 text-destructive" />
-        )
+        <div className="flex items-center gap-1.5">
+          {ipcState && (
+            <span
+              className={cn(
+                "rounded border px-1 font-mono text-[8px] uppercase",
+                ipcAllUp ? "border-secondary/40 text-secondary"
+                  : ipcHubLive ? "border-yellow-500/40 text-yellow-400"
+                  : "border-destructive/40 text-destructive"
+              )}
+              title={`Hub ${ipcHubLive ? "live" : "down"} · ${liveBridges}/${totalBridges} bridges live`}
+            >
+              {ipcHubLive ? `${liveBridges}/${totalBridges}` : "off"}
+            </span>
+          )}
+          <Button
+            type="button"
+            variant="outline"
+            size="icon"
+            className={cn(
+              "h-7 w-7 border-white/10 bg-transparent p-0 hover:bg-white/5",
+              ipcAllUp ? "text-secondary hover:text-destructive" : "text-muted-foreground hover:text-secondary"
+            )}
+            disabled={ipcBusy !== "idle"}
+            onClick={() => setConfirmIntent(ipcAllUp ? "stop" : "start")}
+            title={ipcAllUp ? "Stop IPC stack (hub + bridges)" : "Start IPC stack (hub + bridges)"}
+          >
+            {ipcBusy !== "idle" ? (
+              <RefreshCcw className="h-3.5 w-3.5 animate-spin" />
+            ) : ipcAllUp ? (
+              <PowerOff className="h-3.5 w-3.5" />
+            ) : (
+              <Power className="h-3.5 w-3.5" />
+            )}
+          </Button>
+          {status.ok ? (
+            <Radio className="h-4 w-4 animate-pulse text-secondary" />
+          ) : (
+            <WifiOff className="h-4 w-4 text-destructive" />
+          )}
+        </div>
       }
     >
+      {ipcError && (
+        <div className="mb-2 rounded border border-destructive/40 bg-destructive/5 px-2 py-1 font-mono text-[9px] uppercase text-destructive">
+          {ipcError}
+        </div>
+      )}
+      {confirmIntent && (
+        <div className="mb-2 rounded border border-primary/30 bg-primary/5 p-2 font-mono text-[10px] text-foreground">
+          <p className="mb-2 leading-relaxed">
+            {confirmIntent === "start"
+              ? "Start the IPC hub and all agent bridges? This boots the WSL-side hub.mjs and spawns eve/prime/echo/vesper daemons."
+              : "Stop the IPC stack? This kills hub.mjs and every bridge daemon. The agents stay alive but stop receiving council messages."}
+          </p>
+          <div className="flex justify-end gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="h-7 border-white/10 bg-transparent px-2 font-mono text-[9px] uppercase"
+              onClick={() => setConfirmIntent(null)}
+              disabled={ipcBusy !== "idle"}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              className={cn(
+                "h-7 px-2 font-mono text-[9px] uppercase",
+                confirmIntent === "stop" ? "bg-destructive text-destructive-foreground hover:bg-destructive/90" : "bg-primary text-primary-foreground hover:bg-primary/90"
+              )}
+              onClick={() => triggerIpc(confirmIntent)}
+              disabled={ipcBusy !== "idle"}
+            >
+              {ipcBusy !== "idle" ? "Working…" : confirmIntent === "stop" ? "Stop stack" : "Start stack"}
+            </Button>
+          </div>
+        </div>
+      )}
       <ScrollArea className="h-[260px] pr-4">
         <div className="space-y-3 py-1">
           {groupedAgents.length === 0 ? (
