@@ -75,9 +75,21 @@ export const skillEvolverAdapter: SkillNexusAdapter = {
           description = preview.description;
         }
 
+        // evolution_meta.json is the Evolver's IMC-shaped output. Extract:
+        //   - final_score / original_score   → overall compliance
+        //   - best_genome.{actionability,clarity,specificity,example_count,step_count,novelty}
+        //     → the IMC-axis breakdown (actionability / clarity / specificity / examples / steps
+        //       map directly onto IMC rules; novelty is evolver-specific)
+        //   - last evolution_history[].judgment → promote / revise / reject
         let scoreDelta: number | null = null;
         let evolutionTimestamp: number | null = null;
         let genomeId: string = "";
+        let finalScore: number | null = null;
+        let originalScore: number | null = null;
+        let judgment: string = "";
+        const imcDims: Record<string, number> = {};
+        let evolverReason = "";
+
         const metaRead = await safeReadText(metaPath, cfg.skillNexus.maxFileBytes);
         if (metaRead && !("oversized" in metaRead)) {
           try {
@@ -85,29 +97,74 @@ export const skillEvolverAdapter: SkillNexusAdapter = {
             scoreDelta = Number(parsed?.scoreDelta ?? parsed?.score_delta ?? parsed?.improvement ?? NaN);
             evolutionTimestamp = Number(parsed?.timestamp ?? parsed?.applied_at ?? parsed?.evolved_at ?? NaN);
             genomeId = String(parsed?.genome ?? parsed?.genomeId ?? parsed?.id ?? "");
+            finalScore = Number(parsed?.final_score ?? parsed?.finalScore ?? NaN);
+            originalScore = Number(parsed?.original_score ?? parsed?.originalScore ?? NaN);
+            if (!Number.isFinite(scoreDelta as number) && Number.isFinite(finalScore as number) && Number.isFinite(originalScore as number)) {
+              scoreDelta = (finalScore as number) - (originalScore as number);
+            }
+            // Genome dimensions: best_genome fields are 0..1, evolution_history's per-axis fields
+            // are 0..100. Normalise into integer percentages for display.
+            const bestGenome = parsed?.best_genome || parsed?.bestGenome || {};
+            for (const key of ["actionability", "clarity", "specificity", "novelty"]) {
+              const raw = Number(bestGenome?.[key]);
+              if (Number.isFinite(raw)) imcDims[key] = Math.round(raw <= 1 ? raw * 100 : raw);
+            }
+            if (Number.isFinite(Number(bestGenome?.example_count))) imcDims.examples = Math.round(Number(bestGenome.example_count));
+            if (Number.isFinite(Number(bestGenome?.step_count))) imcDims.steps = Math.round(Number(bestGenome.step_count));
+
+            const history = Array.isArray(parsed?.evolution_history) ? parsed.evolution_history : [];
+            const lastHist = history.length > 0 ? history[history.length - 1] : null;
+            if (lastHist && typeof lastHist === "object") {
+              judgment = String(lastHist.judgment || lastHist.verdict || "").toLowerCase();
+              evolverReason = String(lastHist.reasoning || lastHist.summary || "");
+            }
           } catch {
             warnings.push(`evolution_meta.json parse error in ${evolvedName}.`);
           }
         }
 
+        // IMC compliance level derived from final_score (per IMC.md scoring bands):
+        //   ≥90 full · ≥70 good · ≥50 partial · <50 poor
+        const imcLevel = !Number.isFinite(finalScore as number) ? ""
+          : (finalScore as number) >= 90 ? "full"
+          : (finalScore as number) >= 70 ? "good"
+          : (finalScore as number) >= 50 ? "partial"
+          : "poor";
+
         const stale = stat && isStale(stat.mtimeMs, 60);
         let status: SkillNexusItem["status"] = "ok";
         if (!hasSkillMd) { status = "error"; problemCount += 1; }
         else if (!parentExists) { status = "missing"; problemCount += 1; }
+        else if (judgment === "reject" || judgment === "fail" || judgment === "failed") { status = "error"; problemCount += 1; }
+        else if (judgment === "revise") { status = "pending"; }
+        else if (judgment === "candidate" || judgment === "draft") { status = "candidate"; }
+        else if (imcLevel === "poor" || imcLevel === "partial") { status = "stale"; problemCount += 1; }
         else if (stale) { status = "stale"; problemCount += 1; }
+        else if (judgment === "promote") { status = "ok"; }
+
+        const tags = ["evolved", parentExists ? "paired" : "orphan"];
+        if (judgment) tags.push(judgment);
+        if (imcLevel) tags.push(`imc:${imcLevel}`);
 
         items.push({
           id: shortHash(`evolver|${evolvedName}|${genomeId}`),
           name: clampText(title || parentName, 80),
-          description: clampText(description || (parentExists ? `Evolved from ${parentName}` : "Evolved skill (parent missing)"), 200),
+          description: clampText(
+            evolverReason || description || (parentExists ? `Evolved from ${parentName}` : "Evolved skill (parent missing)"),
+            200
+          ),
           relativePath: toRelativePath(evolvedPath, skillsDir),
           mtime: evolutionTimestamp || stat?.mtimeMs || 0,
           status,
-          tags: ["evolved", parentExists ? "paired" : "orphan"],
+          tags,
           meta: {
             parent: parentName,
             parentPresent: parentExists,
-            ...(Number.isFinite(scoreDelta as number) ? { scoreDelta: Number((scoreDelta as number).toFixed(3)) } : {}),
+            ...(Number.isFinite(finalScore as number) ? { imcScore: Math.round(finalScore as number) } : {}),
+            ...(imcLevel ? { imc: imcLevel } : {}),
+            ...(judgment ? { judgment } : {}),
+            ...(Number.isFinite(scoreDelta as number) ? { scoreDelta: Number((scoreDelta as number).toFixed(2)) } : {}),
+            ...imcDims,
             ...(genomeId ? { genome: genomeId.slice(0, 12) } : {}),
             hasSkillMd,
           },

@@ -7,6 +7,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { cn } from "@/lib/utils";
 import {
   AlertCircle,
+  BookOpen,
   Boxes,
   Brain,
   Cog,
@@ -14,6 +15,7 @@ import {
   Dna,
   FileWarning,
   Flame,
+  Gauge,
   GitBranch,
   Layers,
   Maximize2,
@@ -106,6 +108,15 @@ const HEALTH_TONE: Record<DomainHealth, string> = {
   disabled: "border-white/10 text-muted-foreground",
   unsupported: "border-orange-400/40 text-orange-300",
   empty: "border-white/10 text-muted-foreground",
+};
+
+// IMC compliance bands. The Evolver feed emits one of these via meta.imc when
+// evolution_meta.json contains a final_score (per the IMC.md scoring table).
+const IMC_TONE: Record<string, string> = {
+  full: "border-secondary/50 text-secondary bg-secondary/10",
+  good: "border-primary/50 text-primary bg-primary/10",
+  partial: "border-yellow-500/50 text-yellow-400 bg-yellow-500/10",
+  poor: "border-destructive/50 text-destructive bg-destructive/10",
 };
 
 function formatAgo(ts: number) {
@@ -274,6 +285,13 @@ export function SkillNexus() {
               count={(totals?.problems ?? 0) + (totals?.warnings ?? 0)}
               tone={totals && totals.problems > 0 ? HEALTH_TONE.unreachable : HEALTH_TONE.degraded}
             />
+            <TabButton
+              active={activeTab === "info"}
+              onClick={() => setActiveTab("info")}
+              icon={BookOpen}
+              label="Info"
+              tone="border-primary/30 text-primary"
+            />
           </div>
 
           {/* === Tab content === */}
@@ -283,6 +301,9 @@ export function SkillNexus() {
             )}
             {activeTab === "issues" && (
               <IssuesPanel report={report} warnings={allWarnings} onJumpToDomain={setActiveTab} />
+            )}
+            {activeTab === "info" && (
+              <InfoPanel report={report} expanded={expanded} />
             )}
             {activeDomain && (
               <DomainPanel
@@ -562,37 +583,67 @@ function DomainPanel({
               {statusFilter === "problems" ? "No problems in this domain." : "No items yet."}
             </div>
           ) : (
-            visible.slice(0, 200).map((item) => (
-              <div
-                key={item.id}
-                className={cn(
-                  "rounded border px-2 py-1 font-mono text-[10px]",
-                  STATUS_TONE[item.status || "ok"]
-                )}
-              >
-                <div className="flex items-center gap-2">
-                  <span className="shrink-0 rounded border px-1 text-[8px] uppercase">{item.status || "ok"}</span>
-                  <span className="min-w-0 flex-1 truncate font-bold" title={item.name}>{item.name}</span>
-                  {item.mtime && (
-                    <span className="shrink-0 text-[8px] opacity-70">{formatAgo(item.mtime)}</span>
+            visible.slice(0, 200).map((item) => {
+              const meta = item.meta || {};
+              const imcLevel = typeof meta.imc === "string" ? meta.imc : "";
+              const imcScore = typeof meta.imcScore === "number" ? meta.imcScore : undefined;
+              const judgment = typeof meta.judgment === "string" ? meta.judgment : "";
+              const hasImc = Boolean(imcLevel || imcScore !== undefined || judgment);
+              return (
+                <div
+                  key={item.id}
+                  className={cn(
+                    "rounded border px-2 py-1 font-mono text-[10px]",
+                    STATUS_TONE[item.status || "ok"]
                   )}
-                  {item.size !== undefined && (
-                    <span className="shrink-0 text-[8px] opacity-70">{formatBytes(item.size)}</span>
+                >
+                  <div className="flex items-center gap-2">
+                    <span className="shrink-0 rounded border px-1 text-[8px] uppercase">{item.status || "ok"}</span>
+                    <span className="min-w-0 flex-1 truncate font-bold" title={item.name}>{item.name}</span>
+                    {hasImc && (
+                      <span
+                        className={cn(
+                          "shrink-0 inline-flex items-center gap-1 rounded border px-1.5 py-px text-[8px] uppercase",
+                          IMC_TONE[imcLevel] || "border-primary/40 text-primary"
+                        )}
+                        title={`IMC compliance${imcScore !== undefined ? ` · score ${imcScore}/100` : ""}${judgment ? ` · evolver judgment: ${judgment}` : ""}`}
+                      >
+                        <Gauge className="h-2.5 w-2.5" />
+                        <span>IMC{imcLevel ? ` · ${imcLevel}` : ""}</span>
+                        {imcScore !== undefined && <span className="opacity-80">{imcScore}</span>}
+                      </span>
+                    )}
+                    {item.mtime && (
+                      <span className="shrink-0 text-[8px] opacity-70">{formatAgo(item.mtime)}</span>
+                    )}
+                    {item.size !== undefined && (
+                      <span className="shrink-0 text-[8px] opacity-70">{formatBytes(item.size)}</span>
+                    )}
+                  </div>
+                  {item.description && (
+                    <p className="mt-0.5 truncate text-[9px] opacity-80">{item.description}</p>
+                  )}
+                  {hasImc && (
+                    <p className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[8px] opacity-75">
+                      {judgment && <span className="rounded border border-current/30 px-1 uppercase">judgment: {judgment}</span>}
+                      {typeof meta.actionability === "number" && <span title="IMC: explicit commands present">act {meta.actionability}</span>}
+                      {typeof meta.clarity === "number" && <span title="IMC: clarity / structure">clar {meta.clarity}</span>}
+                      {typeof meta.specificity === "number" && <span title="IMC: no fictional paths">spec {meta.specificity}</span>}
+                      {typeof meta.examples === "number" && <span title="IMC: examples count">ex {meta.examples}</span>}
+                      {typeof meta.steps === "number" && <span title="IMC: numbered executable steps">steps {meta.steps}</span>}
+                    </p>
+                  )}
+                  {(item.relativePath || (item.tags && item.tags.length > 0)) && (
+                    <p className="mt-0.5 flex flex-wrap items-center gap-1.5 truncate text-[8px] opacity-60">
+                      {item.relativePath && <span>{item.relativePath}</span>}
+                      {item.tags?.filter((tag) => !tag.startsWith("imc:") && tag !== judgment).map((tag) => (
+                        <span key={tag} className="rounded border border-current/20 px-1">{tag}</span>
+                      ))}
+                    </p>
                   )}
                 </div>
-                {item.description && (
-                  <p className="mt-0.5 truncate text-[9px] opacity-80">{item.description}</p>
-                )}
-                {(item.relativePath || (item.tags && item.tags.length > 0)) && (
-                  <p className="mt-0.5 flex flex-wrap items-center gap-1.5 truncate text-[8px] opacity-60">
-                    {item.relativePath && <span>{item.relativePath}</span>}
-                    {item.tags?.map((tag) => (
-                      <span key={tag} className="rounded border border-current/20 px-1">{tag}</span>
-                    ))}
-                  </p>
-                )}
-              </div>
-            ))
+              );
+            })
           )}
           {visible.length > 200 && (
             <div className="rounded border border-white/10 bg-black/20 px-2 py-1 font-mono text-[9px] text-muted-foreground">
@@ -614,5 +665,180 @@ function StatTile({ icon: Icon, label, value, tone }: { icon: any; label: string
       </div>
       <p className={cn("mt-1 text-base font-bold", tone)}>{value}</p>
     </div>
+  );
+}
+
+// === Info / InfoDec panel =============================================
+// Static in-app documentation so anyone opening the HUD can understand what each
+// Skill Nexus facet does, what statuses mean, and how IMC scoring is wired in.
+// Built from the actual codebase shape, not aspirational marketing — every claim
+// here mirrors a real adapter, status, or meta field.
+
+const DOMAIN_DOCS: Array<{ type: string; icon: any; title: string; what: string; reads: string }> = [
+  { type: "skillRoot",    icon: Layers,    title: "Skill Roots",          what: "Walks a skill library directory, treats SKILL.md as authoritative + other .md/.json/.yaml as docs.", reads: "frontmatter title/description, file hash, size, mtime, dup-name detection, stale (>90 d)" },
+  { type: "skillForge",   icon: Flame,     title: "Skill Forge",          what: "Watches a forge queue (JSONL) + output directory. Surfaces drafts, candidates, promoted, failed, archived.", reads: "queue state per job, output folder integrity (missing SKILL.md flagged)" },
+  { type: "skillEvolver", icon: Dna,       title: "Skill Evolver",        what: "Pairs every *-evolved skill with its parent. Reads the evolver's per-skill evolution_meta.json + state + applied genome.", reads: "final_score, judgment (promote/revise/reject), genome dimensions, IMC compliance level" },
+  { type: "sessionMiner", icon: Brain,     title: "Session Miner",        what: "Reads mined skill candidates from outputDir/outputFile (endpoint/command modes are stubbed).", reads: "candidate name, session hash, confidence, suggested action — never raw chat" },
+  { type: "reportFile",   icon: Database,  title: "Report Files",         what: "Generic JSON/JSONL ingester for validation runs, council status snapshots, build outputs.", reads: "name, severity, score, passed/failed/pending, timestamp" },
+  { type: "projectDocs",  icon: GitBranch, title: "Project Docs",         what: "Shallow walk of a project's per-feature skill docs (NEXUS_SKILLS.md, etc.).", reads: "frontmatter, headers, stale (>120 d)" },
+  { type: "syncStatus",   icon: Network,   title: "Cross-Agent Sync",     what: "Snapshot of multi-agent skill sync — which agent has what, what's missing/conflicting.", reads: "lastSync, missing count, conflict count" },
+  { type: "genericJson",  icon: Boxes,     title: "Generic JSON",         what: "Fallback adapter for any other JSON snapshot the operator wants surfaced.", reads: "top-level entries by name/title/description" },
+];
+
+const STATUS_DOCS: Array<{ status: SkillItemStatus; label: string; meaning: string }> = [
+  { status: "ok",         label: "ok",         meaning: "Item is healthy. SKILL.md present, parent paired, not stale, evolver judgment is promote (when applicable)." },
+  { status: "stale",      label: "stale",      meaning: "File hasn't been touched in a long time (60 d evolved / 90 d skill / 120 d doc / 7 d report). Or IMC bands at partial/poor." },
+  { status: "duplicate",  label: "duplicate",  meaning: "Another item in the same domain shares this skill's name." },
+  { status: "conflicted", label: "conflicted", meaning: "Sync adapter found a divergence between agents." },
+  { status: "missing",    label: "missing",    meaning: "Required pair/parent is absent. e.g. -evolved skill whose source was deleted." },
+  { status: "oversized",  label: "oversized",  meaning: "File exceeds skillNexus.maxFileBytes (default 512 KB). Skipped to keep scans cheap." },
+  { status: "error",      label: "error",      meaning: "Parse error, missing SKILL.md, evolver judgment=reject/fail, or generic adapter failure." },
+  { status: "pending",    label: "pending",    meaning: "Queued — forge job not yet run, evolver judgment=revise, report severity=pending." },
+  { status: "candidate",  label: "candidate",  meaning: "Mined or forged but not yet promoted. Eligible for review." },
+  { status: "deprecated", label: "deprecated", meaning: "Archived or marked obsolete by the source." },
+];
+
+function InfoPanel({ report, expanded }: { report: SkillNexusReport | null; expanded: boolean }) {
+  const usedTypes = useMemo(() => {
+    const set = new Set<string>();
+    (report?.domains ?? []).forEach((domain) => set.add(domain.type));
+    return set;
+  }, [report]);
+
+  return (
+    <ScrollArea className={cn("rounded border border-white/10 bg-black/30 p-3", expanded ? "h-[calc(100vh-22rem)]" : "h-[420px]")}>
+      <div className="space-y-4 pr-2 font-mono text-[10px] leading-relaxed text-slate-200">
+
+        <section>
+          <h4 className="mb-1 flex items-center gap-2 font-headline text-[11px] font-bold uppercase tracking-wider text-primary">
+            <Sparkles className="h-3.5 w-3.5" /> What is Skill Nexus?
+          </h4>
+          <p className="text-muted-foreground">
+            A federated registry that monitors every place skills are produced, scored, or organised on this machine.
+            Each entry in <code className="text-primary">skillNexus.domains[]</code> in <code className="text-primary">council.config.local.json</code>
+            is observed by a typed adapter. Unknown types render as &quot;unavailable adapter&quot; instead of crashing.
+            All paths are redacted to relative paths before reaching this UI.
+          </p>
+        </section>
+
+        <section>
+          <h4 className="mb-1 flex items-center gap-2 font-headline text-[11px] font-bold uppercase tracking-wider text-primary">
+            <Layers className="h-3.5 w-3.5" /> Domain types
+          </h4>
+          <div className="space-y-1.5">
+            {DOMAIN_DOCS.map((doc) => {
+              const Icon = doc.icon;
+              const inUse = usedTypes.has(doc.type);
+              return (
+                <div
+                  key={doc.type}
+                  className={cn(
+                    "rounded border px-2 py-1.5",
+                    inUse ? "border-secondary/30 bg-secondary/5" : "border-white/10 bg-black/20"
+                  )}
+                >
+                  <div className="flex items-center gap-2">
+                    <Icon className={cn("h-3 w-3", inUse ? "text-secondary" : "text-muted-foreground")} />
+                    <span className="font-bold uppercase tracking-wider">{doc.title}</span>
+                    <span className="text-[8px] uppercase text-muted-foreground/70">type: {doc.type}</span>
+                    {inUse && <span className="rounded border border-secondary/40 px-1 text-[8px] uppercase text-secondary">in use</span>}
+                  </div>
+                  <p className="mt-1 text-muted-foreground">{doc.what}</p>
+                  <p className="mt-0.5 text-[9px] uppercase tracking-wider text-muted-foreground/70">
+                    reads: <span className="text-foreground/80 normal-case">{doc.reads}</span>
+                  </p>
+                </div>
+              );
+            })}
+          </div>
+        </section>
+
+        <section>
+          <h4 className="mb-1 flex items-center gap-2 font-headline text-[11px] font-bold uppercase tracking-wider text-primary">
+            <Gauge className="h-3.5 w-3.5" /> IMC — Idiot Model Cost
+          </h4>
+          <p className="text-muted-foreground">
+            IMC is the council&apos;s permanent quality rule: design for the weakest model that might run the skill. The
+            Skill Evolver scores every evolved skill against the same axes IMC defines. When an item has IMC data, it&apos;s
+            badged in the row with a <span className="inline-flex items-center gap-1 rounded border border-primary/40 bg-primary/10 px-1 text-primary"><Gauge className="h-2.5 w-2.5" />IMC</span> tag.
+          </p>
+          <div className="mt-2 grid grid-cols-2 gap-1.5 sm:grid-cols-4">
+            <div className={cn("rounded border px-2 py-1.5 text-center", IMC_TONE.full)}>
+              <p className="text-[9px] uppercase opacity-80">full</p><p className="text-sm font-bold">≥ 90</p>
+            </div>
+            <div className={cn("rounded border px-2 py-1.5 text-center", IMC_TONE.good)}>
+              <p className="text-[9px] uppercase opacity-80">good</p><p className="text-sm font-bold">≥ 70</p>
+            </div>
+            <div className={cn("rounded border px-2 py-1.5 text-center", IMC_TONE.partial)}>
+              <p className="text-[9px] uppercase opacity-80">partial</p><p className="text-sm font-bold">≥ 50</p>
+            </div>
+            <div className={cn("rounded border px-2 py-1.5 text-center", IMC_TONE.poor)}>
+              <p className="text-[9px] uppercase opacity-80">poor</p><p className="text-sm font-bold">&lt; 50</p>
+            </div>
+          </div>
+          <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 text-muted-foreground sm:grid-cols-3">
+            <p><strong className="text-foreground">act</strong> — actionability: explicit commands, not descriptions</p>
+            <p><strong className="text-foreground">clar</strong> — clarity: headers, structure, examples</p>
+            <p><strong className="text-foreground">spec</strong> — specificity: no fictional paths</p>
+            <p><strong className="text-foreground">ex</strong> — examples count provided</p>
+            <p><strong className="text-foreground">steps</strong> — numbered executable steps</p>
+            <p><strong className="text-foreground">judgment</strong> — evolver verdict: promote / revise / reject</p>
+          </div>
+        </section>
+
+        <section>
+          <h4 className="mb-1 flex items-center gap-2 font-headline text-[11px] font-bold uppercase tracking-wider text-primary">
+            <ShieldCheck className="h-3.5 w-3.5" /> Item statuses
+          </h4>
+          <div className="space-y-1">
+            {STATUS_DOCS.map((doc) => (
+              <div key={doc.status} className="flex items-start gap-2">
+                <span className={cn("shrink-0 rounded border px-1 py-px text-[8px] uppercase", STATUS_TONE[doc.status])}>
+                  {doc.label}
+                </span>
+                <span className="flex-1 text-muted-foreground">{doc.meaning}</span>
+              </div>
+            ))}
+          </div>
+        </section>
+
+        <section>
+          <h4 className="mb-1 flex items-center gap-2 font-headline text-[11px] font-bold uppercase tracking-wider text-primary">
+            <BookOpen className="h-3.5 w-3.5" /> Tabs in this card
+          </h4>
+          <ul className="ml-4 list-disc space-y-0.5 text-muted-foreground marker:text-primary">
+            <li><strong className="text-foreground">Overview</strong> — totals + per-domain summary rows (click to jump).</li>
+            <li><strong className="text-foreground">&lt;Each domain&gt;</strong> — auto-derived tab per configured domain. Filter All / Problems.</li>
+            <li><strong className="text-foreground">Issues</strong> — every warning + every non-ok item flattened into one feed.</li>
+            <li><strong className="text-foreground">Info</strong> — this panel.</li>
+          </ul>
+        </section>
+
+        <section>
+          <h4 className="mb-1 flex items-center gap-2 font-headline text-[11px] font-bold uppercase tracking-wider text-primary">
+            <ShieldCheck className="h-3.5 w-3.5" /> Privacy
+          </h4>
+          <ul className="ml-4 list-disc space-y-0.5 text-muted-foreground marker:text-primary">
+            <li>All adapters return relative paths only — never absolute machine paths.</li>
+            <li>Real source paths live in <code className="text-primary">council.config.local.json</code> (gitignored).</li>
+            <li>Public <code className="text-primary">council.config.example.json</code> ships placeholders only.</li>
+            <li>API route is gated by <code className="text-primary">canUseLocalCouncilApi</code>; remote requests get 403.</li>
+            <li>Session Miner / Skill Forge summarise — they never expose raw chat or evolver content.</li>
+          </ul>
+        </section>
+
+        {report && (
+          <section>
+            <h4 className="mb-1 flex items-center gap-2 font-headline text-[11px] font-bold uppercase tracking-wider text-primary">
+              <Cog className="h-3.5 w-3.5" /> This snapshot
+            </h4>
+            <p className="text-muted-foreground">
+              {report.totals.domains} domains configured · {report.totals.enabledDomains} enabled · {report.totals.healthyDomains} healthy · {report.totals.items} items · {report.totals.problems} problems · {report.totals.warnings} warnings.
+              Auto-refresh every {Math.round(report.pollIntervalMs / 1000)} s.
+            </p>
+          </section>
+        )}
+      </div>
+    </ScrollArea>
   );
 }
