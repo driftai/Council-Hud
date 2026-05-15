@@ -771,7 +771,7 @@ export default function Home() {
           <div className="h-8 w-px bg-white/10 mx-1" />
           
           <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-white/5 border border-white/10 cursor-pointer hover:bg-white/10 transition-colors">
-            <div className="w-6 h-6 rounded-full bg-primary/40 border border-primary/20 flex items-center justify-center text-[10px] font-bold">NV</div>
+            <div className="w-6 h-6 rounded-full bg-primary/40 border border-primary/20 flex items-center justify-center text-[10px] font-bold">OP</div>
             <span className="font-mono-readout text-[10px]">Operator</span>
           </div>
         </div>

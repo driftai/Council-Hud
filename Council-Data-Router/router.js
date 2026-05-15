@@ -211,8 +211,8 @@ function scoreTemperatureSensor(sensor) {
     if (identifier.includes('/intelcpu/') || identifier.includes('/amdcpu/')) score += 30;
     if (combined.includes('cpu')) score += 15;
     // Prefer steady-state readings (average / package) over alarming peaks (core max). Core Max
-    // is intentionally a per-sample maximum and is what was reading 98–100°C on the operator's laptop
-    // even though Core Average sat near 84°C. Keep it positive but well below averages.
+    // is intentionally a per-sample maximum and on some laptops reads 98–100°C even when Core
+    // Average sits near 84°C. Keep it positive but well below averages.
     if (combined.includes('average') || /\bavg\b/.test(combined)) score += 20;
     if (combined.includes('package')) score += 15;
     if (combined.includes('tctl') || combined.includes('tdie')) score += 12;

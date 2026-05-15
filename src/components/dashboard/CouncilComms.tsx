@@ -326,8 +326,8 @@ export function CouncilComms() {
   const lastPacket = allMessages.at(-1);
 
   // Per-bridge delivery health: track the latest ACK timestamp from each *-bridge sender,
-  // and surface its age. Bridges run their own poll loops outside the HUD; this lets Drift
-  // see at a glance which bridges are flowing and which are lagging behind a broadcast.
+  // and surface its age. Bridges run their own poll loops outside the HUD; this lets the
+  // operator see at a glance which bridges are flowing and which are lagging behind a broadcast.
   const bridgeStatus = useMemo(() => {
     const latest = new Map<string, number>();
     for (const message of messages) {

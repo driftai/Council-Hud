@@ -74,13 +74,9 @@ This project is optimized for **Project IDX** environments. To synchronize the g
 
 ## 🎖️ Acknowledgements & Legacy
 
-This project, and the broader "agentic vibe" that drives it, was born from the foundational influence of **OpenClaw**. 
-
-OpenClaw provided the initial spark for autonomous AI experimentation and remains the spiritual predecessor to the Council HUD architecture. We honor the heritage of the OpenClaw ecosystem as we push the boundaries of neural-to-hardware interoperability.
-
-Additional agents that worked on this project: Nova, Astro.
+The HUD is inspired by the broader open-source agent-framework ecosystem — a heritage of autonomous-AI experiments that fed into the Council HUD architecture and its neural-to-hardware bridge.
 
 ---
-**[SIGNAL_STATUS]**: GOLDEN_STATE  
-**[ENCRYPTION]**: AES-256-NEXUS  
+**[SIGNAL_STATUS]**: GOLDEN_STATE
+**[ENCRYPTION]**: AES-256-NEXUS
 **[OPERATOR_ID]**: REDACTED

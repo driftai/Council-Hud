@@ -12,7 +12,7 @@ const LOCAL_KEY_PATH = pathModule.join(process.cwd(), 'Council-Data-Router', 'ne
 
 /**
  * Nexus Proxy Fortress V110
- * - Resolves CORS and Tunnel Drift by proxying requests server-side.
+ * - Resolves CORS and tunnel staleness by proxying requests server-side.
  * - Handles method-agnostic forwarding (GET/POST).
  */
 export async function GET(request: NextRequest, props: { params: Promise<{ path: string[] }> }) {
