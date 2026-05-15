@@ -104,15 +104,21 @@ export const skillRootAdapter: SkillNexusAdapter = {
         continue;
       }
 
-      const { title, description } = stripMarkdownPreview(read.content);
+      const preview = stripMarkdownPreview(read.content);
       const skillFolder = file.type === "skill.md" ? dirname(relPath) : "";
-      const baseName = title || (skillFolder ? skillFolder.split("/").pop() : relPath.split("/").pop()) || relPath;
+      const baseName = preview.title || (skillFolder ? skillFolder.split("/").pop() : relPath.split("/").pop()) || relPath;
       const name = clampText(baseName, 80);
       const stale = isStale(read.mtime, 90);
 
       const dupeKey = name.toLowerCase();
       const dupeCount = (seenNames.get(dupeKey) || 0) + 1;
       seenNames.set(dupeKey, dupeCount);
+
+      // Missing-description warning per the original spec.
+      const missingDescription = file.type === "skill.md" && !preview.description;
+      if (missingDescription) {
+        warnings.push(`Skill missing description: ${relPath}`);
+      }
 
       let status: SkillNexusItem["status"] = "ok";
       if (dupeCount > 1) {
@@ -121,18 +127,34 @@ export const skillRootAdapter: SkillNexusAdapter = {
       } else if (stale) {
         status = "stale";
         problemCount += 1;
+      } else if (missingDescription) {
+        // Soft signal — still ok, but flag it in the tag set.
       }
+
+      const tags = file.type === "skill.md" ? ["skill"] : ["doc"];
+      if (missingDescription) tags.push("no-description");
+      if ((preview.codeBlockCount || 0) >= 1) tags.push("has-examples");
+      if (preview.requires && preview.requires.length > 0) tags.push("requires-env");
 
       items.push({
         id: shortHash(`${relPath}|${name}`),
         name,
-        description,
+        description: preview.description,
         relativePath: relPath,
         size: read.size,
         mtime: read.mtime,
         hash: shortHash(read.content),
         status,
-        tags: file.type === "skill.md" ? ["skill"] : ["doc"],
+        tags,
+        meta: {
+          ...(preview.homepage ? { homepage: preview.homepage } : {}),
+          ...(preview.version ? { version: preview.version } : {}),
+          ...(preview.license ? { license: preview.license } : {}),
+          ...(preview.requires && preview.requires.length > 0 ? { requiresEnv: preview.requires.join(", ") } : {}),
+          ...(typeof preview.headingCount === "number" ? { headings: preview.headingCount } : {}),
+          ...(typeof preview.codeBlockCount === "number" ? { codeBlocks: preview.codeBlockCount } : {}),
+          ...(typeof preview.bulletCount === "number" ? { bullets: preview.bulletCount } : {}),
+        },
       });
     }
 

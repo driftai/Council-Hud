@@ -3,7 +3,7 @@ import "server-only";
 import type { SkillNexusAdapter, SkillNexusDomainSnapshot, SkillNexusItem } from "../types";
 import type { SkillNexusDomainConfig } from "@/lib/council-config";
 import { loadCouncilConfig } from "@/lib/council-config";
-import { clampText, isStale, safeReadText, shortHash } from "../helpers";
+import { clampText, isStale, redactAgentNames, safeReadText, shortHash } from "../helpers";
 
 // Report File adapter: reads a single JSON or JSONL file of entries (e.g. validation reports,
 // council status snapshots, build outputs). Each entry becomes a Skill Nexus item with
@@ -52,8 +52,8 @@ export const reportFileAdapter: SkillNexusAdapter = {
     for (const entry of entries.slice(0, 200)) {
       if (!entry || typeof entry !== "object") continue;
       const rawName = String(entry.name || entry.title || entry.id || entry.skill || entry.key || "entry");
-      const name = clampText(rawName, 80);
-      const description = clampText(String(entry.description || entry.summary || entry.message || ""), 200);
+      const name = clampText(redactAgentNames(rawName), 80);
+      const description = clampText(redactAgentNames(String(entry.description || entry.summary || entry.message || "")), 200);
       const status = inferStatus(entry);
       if (status !== "ok" && status !== "pending") problemCount += 1;
       const mtime = Number(entry.timestamp || entry.mtime || entry.updatedAt || read.mtime) || read.mtime;

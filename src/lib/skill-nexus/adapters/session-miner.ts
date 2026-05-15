@@ -6,7 +6,7 @@ import { join } from "node:path";
 import type { SkillNexusAdapter, SkillNexusDomainSnapshot, SkillNexusItem } from "../types";
 import type { SkillNexusDomainConfig } from "@/lib/council-config";
 import { loadCouncilConfig } from "@/lib/council-config";
-import { clampText, isStale, safeReadText, shortHash } from "../helpers";
+import { clampText, isStale, redactAgentNames, safeReadText, shortHash } from "../helpers";
 
 // Session Miner adapter: reads mined skill candidates. Supports either:
 //   - source.outputDir: scan all *.json/*.jsonl mined files in a directory
@@ -98,10 +98,10 @@ export const sessionMinerAdapter: SkillNexusAdapter = {
 
         items.push({
           id: shortHash(`${candidateName}|${sessionHash}|${entry.timestamp || ""}`),
-          name: candidateName,
+          name: redactAgentNames(candidateName),
           // Description is the short reason field, NEVER raw chat. Adapters never propagate
           // free-form excerpts unless the entry explicitly stores a safe-redacted preview.
-          description: clampText(String(entry.reason || entry.summary || entry.label || ""), 200),
+          description: clampText(redactAgentNames(String(entry.reason || entry.summary || entry.label || "")), 200),
           mtime: Number(entry.timestamp || read.mtime) || read.mtime,
           status,
           tags: [action, "candidate"],

@@ -4,6 +4,8 @@ import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { basename, relative, sep } from "node:path";
 
+import { loadCouncilConfig } from "@/lib/council-config";
+
 export function shortHash(content: string): string {
   return createHash("sha256").update(content).digest("hex").slice(0, 12);
 }
@@ -43,6 +45,44 @@ export async function safeReadText(
   }
 }
 
+// Redact configured agent names + common operator handles from a free-text string. SKILL.md
+// descriptions and evolver reasoning fields routinely cite real agent names (e.g. "Drift uses
+// this when…", "Iris triggers", "Eve's daily check"); leaving them through would leak the
+// same identifiers the rest of the HUD scrubs. Lowercase variants are NOT redacted because
+// many agent names overlap with common shell/code words (echo, prime, novelty) — only the
+// capitalized standalone form is replaced.
+//
+// Replacement strategy: each configured agent gets a generic placeholder based on its mode
+// (operator → "the operator", live → "a live agent", viewer → "a viewer agent", bridge → "a bridge").
+export function redactAgentNames(text: string): string {
+  if (!text) return text;
+  let out = text;
+  try {
+    const agents = loadCouncilConfig().council.agents;
+    for (const [name, profile] of Object.entries(agents)) {
+      if (!name || name.length < 2) continue;
+      const capitalized = name.charAt(0).toUpperCase() + name.slice(1).toLowerCase();
+      const replacement = profile.mode === "operator"
+        ? "the operator"
+        : profile.mode === "viewer"
+          ? "a viewer agent"
+          : profile.mode === "bridge"
+            ? "a bridge"
+            : "a live agent";
+      // Word-boundaried, case-sensitive on the capitalized form. Avoids gutting innocent
+      // lowercase words ("echo the value", "prime number", "iris flower").
+      out = out.replace(new RegExp(`\\b${capitalized}\\b`, "g"), replacement);
+      // Also catch UPPERCASE shouting form.
+      out = out.replace(new RegExp(`\\b${name.toUpperCase()}\\b`, "g"), replacement.toUpperCase());
+    }
+    // Common operator-identifier patterns that aren't in agents map.
+    out = out.replace(/\bAlvin\b/g, "the operator");
+  } catch {
+    // If config load fails for any reason, return original — better than crashing the scan.
+  }
+  return out;
+}
+
 // Cap an arbitrary string to a max display length without breaking mid-word.
 export function clampText(value: string, maxLen = 200): string {
   if (!value) return "";
@@ -54,12 +94,28 @@ export function clampText(value: string, maxLen = 200): string {
 }
 
 // Strip markdown decorations + leading frontmatter for the description preview.
-export function stripMarkdownPreview(content: string): { title: string; description: string } {
+// Returns title + description + auxiliary frontmatter fields (homepage, version, license,
+// requires) that are safe to surface. Agent identifiers are redacted from free-text fields.
+export function stripMarkdownPreview(content: string): {
+  title: string;
+  description: string;
+  homepage?: string;
+  version?: string;
+  license?: string;
+  requires?: string[];
+  headingCount?: number;
+  codeBlockCount?: number;
+  bulletCount?: number;
+} {
   if (!content) return { title: "", description: "" };
 
   let body = content;
   let frontmatterTitle = "";
   let frontmatterDescription = "";
+  let homepage = "";
+  let version = "";
+  let license = "";
+  const requires: string[] = [];
 
   // YAML frontmatter (--- … ---).
   const fmMatch = content.match(/^---\s*\r?\n([\s\S]*?)\r?\n---\s*\r?\n([\s\S]*)$/);
@@ -67,12 +123,23 @@ export function stripMarkdownPreview(content: string): { title: string; descript
     const yamlBlock = fmMatch[1];
     body = fmMatch[2];
     for (const line of yamlBlock.split(/\r?\n/)) {
-      const fieldMatch = line.match(/^(name|title|description|summary)\s*:\s*(.+)$/i);
+      const fieldMatch = line.match(/^(name|title|description|summary|homepage|version|license)\s*:\s*(.+)$/i);
       if (!fieldMatch) continue;
       const key = fieldMatch[1].toLowerCase();
       const value = fieldMatch[2].trim().replace(/^["']|["']$/g, "");
       if ((key === "name" || key === "title") && !frontmatterTitle) frontmatterTitle = value;
       if ((key === "description" || key === "summary") && !frontmatterDescription) frontmatterDescription = value;
+      if (key === "homepage") homepage = value;
+      if (key === "version") version = value;
+      if (key === "license") license = value;
+    }
+    // Best-effort capture of requires.env: [LIST] across multi-line YAML.
+    const envMatch = yamlBlock.match(/requires[\s\S]*?env\s*:\s*\[([^\]]*)\]/i);
+    if (envMatch) {
+      for (const item of envMatch[1].split(",")) {
+        const cleaned = item.trim().replace(/^["']|["']$/g, "");
+        if (cleaned && /^[A-Z_][A-Z0-9_]*$/i.test(cleaned)) requires.push(cleaned);
+      }
     }
   }
 
@@ -96,7 +163,22 @@ export function stripMarkdownPreview(content: string): { title: string; descript
     description = firstPara ? firstPara.replace(/^[*_>`-]+\s*/, "") : "";
   }
 
-  return { title: clampText(title, 80), description: clampText(description, 200) };
+  // Quick structural counts — useful for IMC-style "examples present?" / "steps present?" hints.
+  const headingCount = lines.filter((line) => /^#{1,6}\s+\S/.test(line)).length;
+  const codeBlockCount = (body.match(/```[a-z]*\b/gi) || []).length;
+  const bulletCount = lines.filter((line) => /^\s*(?:[-*+]|\d+\.)\s+\S/.test(line)).length;
+
+  return {
+    title: clampText(redactAgentNames(title), 80),
+    description: clampText(redactAgentNames(description), 200),
+    ...(homepage ? { homepage: clampText(homepage, 120) } : {}),
+    ...(version ? { version: clampText(version, 40) } : {}),
+    ...(license ? { license: clampText(license, 40) } : {}),
+    ...(requires.length > 0 ? { requires } : {}),
+    headingCount,
+    codeBlockCount,
+    bulletCount,
+  };
 }
 
 // Walk a directory non-recursively but follow one level of nested skill folders. Returns

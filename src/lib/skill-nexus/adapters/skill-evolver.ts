@@ -6,7 +6,7 @@ import { join } from "node:path";
 import type { SkillNexusAdapter, SkillNexusDomainSnapshot, SkillNexusItem } from "../types";
 import type { SkillNexusDomainConfig } from "@/lib/council-config";
 import { loadCouncilConfig } from "@/lib/council-config";
-import { clampText, isStale, safeReadText, shortHash, stripMarkdownPreview, toRelativePath } from "../helpers";
+import { clampText, isStale, redactAgentNames, safeReadText, shortHash, stripMarkdownPreview, toRelativePath } from "../helpers";
 
 // Skill Evolver adapter: surfaces evolved-skill relationships, in-progress evolutions, and
 // (when present) genome state. Unlike Skill Forge, an evolver produces *paired* artifacts —
@@ -87,21 +87,34 @@ export const skillEvolverAdapter: SkillNexusAdapter = {
         let finalScore: number | null = null;
         let originalScore: number | null = null;
         let judgment: string = "";
+        let promoted: boolean | null = null;
+        let failureReason: string = "";
+        let generationsRun: number | null = null;
+        let attemptsLogged: number | null = null;
+        let lastMethod: string = "";
         const imcDims: Record<string, number> = {};
         let evolverReason = "";
+        let judgmentHistogram: Record<string, number> = {};
 
         const metaRead = await safeReadText(metaPath, cfg.skillNexus.maxFileBytes);
         if (metaRead && !("oversized" in metaRead)) {
           try {
             const parsed = JSON.parse(metaRead.content);
             scoreDelta = Number(parsed?.scoreDelta ?? parsed?.score_delta ?? parsed?.improvement ?? NaN);
-            evolutionTimestamp = Number(parsed?.timestamp ?? parsed?.applied_at ?? parsed?.evolved_at ?? NaN);
+            // evolved_at is the canonical evolver-emitted timestamp (preferred over mtime).
+            evolutionTimestamp = Number(parsed?.evolved_at ?? parsed?.timestamp ?? parsed?.applied_at ?? NaN);
             genomeId = String(parsed?.genome ?? parsed?.genomeId ?? parsed?.id ?? "");
             finalScore = Number(parsed?.final_score ?? parsed?.finalScore ?? NaN);
             originalScore = Number(parsed?.original_score ?? parsed?.originalScore ?? NaN);
             if (!Number.isFinite(scoreDelta as number) && Number.isFinite(finalScore as number) && Number.isFinite(originalScore as number)) {
               scoreDelta = (finalScore as number) - (originalScore as number);
             }
+            // Was this evolution actually promoted/applied? Separate from per-generation judgment.
+            promoted = typeof parsed?.promoted === "boolean" ? parsed.promoted : null;
+            failureReason = String(parsed?.failure_reason ?? parsed?.failureReason ?? "").trim();
+            generationsRun = Number(parsed?.generations_run ?? parsed?.generationsRun ?? NaN);
+            if (!Number.isFinite(generationsRun as number)) generationsRun = null;
+
             // Genome dimensions: best_genome fields are 0..1, evolution_history's per-axis fields
             // are 0..100. Normalise into integer percentages for display.
             const bestGenome = parsed?.best_genome || parsed?.bestGenome || {};
@@ -113,10 +126,18 @@ export const skillEvolverAdapter: SkillNexusAdapter = {
             if (Number.isFinite(Number(bestGenome?.step_count))) imcDims.steps = Math.round(Number(bestGenome.step_count));
 
             const history = Array.isArray(parsed?.evolution_history) ? parsed.evolution_history : [];
+            attemptsLogged = history.length;
+            // Count every per-generation judgment, surface it so the UI can show "5 attempts → 3 promote / 2 revise".
+            for (const entry of history) {
+              if (!entry || typeof entry !== "object") continue;
+              const j = String(entry.judgment || entry.verdict || "").toLowerCase();
+              if (j) judgmentHistogram[j] = (judgmentHistogram[j] || 0) + 1;
+            }
             const lastHist = history.length > 0 ? history[history.length - 1] : null;
             if (lastHist && typeof lastHist === "object") {
               judgment = String(lastHist.judgment || lastHist.verdict || "").toLowerCase();
               evolverReason = String(lastHist.reasoning || lastHist.summary || "");
+              lastMethod = String(lastHist.method || "").toLowerCase();
             }
           } catch {
             warnings.push(`evolution_meta.json parse error in ${evolvedName}.`);
@@ -146,11 +167,16 @@ export const skillEvolverAdapter: SkillNexusAdapter = {
         if (judgment) tags.push(judgment);
         if (imcLevel) tags.push(`imc:${imcLevel}`);
 
+        // Build a compact attempts-summary string like "3 attempts (promote 1, revise 2)" for the UI.
+        const histSummary = Object.keys(judgmentHistogram).length > 0
+          ? Object.entries(judgmentHistogram).map(([j, n]) => `${j} ${n}`).join(" / ")
+          : "";
+
         items.push({
           id: shortHash(`evolver|${evolvedName}|${genomeId}`),
-          name: clampText(title || parentName, 80),
+          name: clampText(redactAgentNames(title || parentName), 80),
           description: clampText(
-            evolverReason || description || (parentExists ? `Evolved from ${parentName}` : "Evolved skill (parent missing)"),
+            redactAgentNames(evolverReason || description || (parentExists ? `Evolved from ${parentName}` : "Evolved skill (parent missing)")),
             200
           ),
           relativePath: toRelativePath(evolvedPath, skillsDir),
@@ -161,8 +187,15 @@ export const skillEvolverAdapter: SkillNexusAdapter = {
             parent: parentName,
             parentPresent: parentExists,
             ...(Number.isFinite(finalScore as number) ? { imcScore: Math.round(finalScore as number) } : {}),
+            ...(Number.isFinite(originalScore as number) ? { originalScore: Math.round(originalScore as number) } : {}),
             ...(imcLevel ? { imc: imcLevel } : {}),
             ...(judgment ? { judgment } : {}),
+            ...(promoted !== null ? { promoted } : {}),
+            ...(failureReason && failureReason !== "unknown" ? { failureReason: clampText(failureReason, 80) } : {}),
+            ...(Number.isFinite(generationsRun as number) && (generationsRun as number) > 0 ? { generations: generationsRun as number } : {}),
+            ...(attemptsLogged && attemptsLogged > 0 ? { attempts: attemptsLogged } : {}),
+            ...(histSummary ? { historySummary: histSummary } : {}),
+            ...(lastMethod ? { method: lastMethod } : {}),
             ...(Number.isFinite(scoreDelta as number) ? { scoreDelta: Number((scoreDelta as number).toFixed(2)) } : {}),
             ...imcDims,
             ...(genomeId ? { genome: genomeId.slice(0, 12) } : {}),

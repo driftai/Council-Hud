@@ -3,7 +3,7 @@ import "server-only";
 import type { SkillNexusAdapter, SkillNexusDomainSnapshot, SkillNexusItem } from "../types";
 import type { SkillNexusDomainConfig } from "@/lib/council-config";
 import { loadCouncilConfig } from "@/lib/council-config";
-import { clampText, isStale, safeReadText, shortHash } from "../helpers";
+import { clampText, isStale, redactAgentNames, safeReadText, shortHash } from "../helpers";
 
 // Sync Status adapter: reads a snapshot JSON describing cross-agent skill sync. Expected shape
 // is loose — { agents: { <agent>: { lastSync, skills, missing, conflicts } } } — but any object
@@ -48,8 +48,8 @@ export const syncStatusAdapter: SkillNexusAdapter = {
       if (status !== "ok") problemCount += 1;
       items.push({
         id: shortHash(`sync|${key}|${lastSync}`),
-        name: clampText(key, 80),
-        description: clampText(String(info.summary || info.note || ""), 200),
+        name: clampText(redactAgentNames(key), 80),
+        description: clampText(redactAgentNames(String(info.summary || info.note || "")), 200),
         mtime: lastSync || read.mtime,
         status,
         tags: ["sync"],

@@ -3,7 +3,7 @@ import "server-only";
 import type { SkillNexusAdapter, SkillNexusDomainSnapshot, SkillNexusItem } from "../types";
 import type { SkillNexusDomainConfig } from "@/lib/council-config";
 import { loadCouncilConfig } from "@/lib/council-config";
-import { clampText, safeReadText, shortHash } from "../helpers";
+import { clampText, redactAgentNames, safeReadText, shortHash } from "../helpers";
 
 // Generic JSON adapter: a catch-all for any JSON snapshot file someone wants to monitor. It
 // surfaces top-level entries (keys of an object, or items of an array) as Skill Nexus items
@@ -32,8 +32,8 @@ export const genericJsonAdapter: SkillNexusAdapter = {
       const rawName = String(record.name || record.title || record.id || record.key || "entry");
       return {
         id: shortHash(`${rawName}|${JSON.stringify(record).slice(0, 80)}`),
-        name: clampText(rawName, 80),
-        description: clampText(String(record.description || record.summary || ""), 200),
+        name: clampText(redactAgentNames(rawName), 80),
+        description: clampText(redactAgentNames(String(record.description || record.summary || "")), 200),
         mtime: Number(record.timestamp || record.mtime || read.mtime) || read.mtime,
         status: "ok",
         tags: ["json"],

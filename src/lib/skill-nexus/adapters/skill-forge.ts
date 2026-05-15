@@ -6,7 +6,7 @@ import { join } from "node:path";
 import type { SkillNexusAdapter, SkillNexusDomainSnapshot, SkillNexusItem } from "../types";
 import type { SkillNexusDomainConfig } from "@/lib/council-config";
 import { loadCouncilConfig } from "@/lib/council-config";
-import { clampText, isStale, safeReadText, shortHash, toRelativePath } from "../helpers";
+import { clampText, isStale, redactAgentNames, safeReadText, shortHash, toRelativePath } from "../helpers";
 
 // Skill Forge adapter: monitors a forge queue + output dir. Surfaces drafts/candidates/
 // promoted skills/failed runs/validation status. Adapter never reads raw session text;
@@ -47,7 +47,7 @@ export const skillForgeAdapter: SkillNexusAdapter = {
           try { entry = JSON.parse(line); } catch { continue; }
           if (!entry || typeof entry !== "object") continue;
 
-          const name = clampText(String(entry.name || entry.candidate || entry.skill || "forge-job"), 80);
+          const name = clampText(redactAgentNames(String(entry.name || entry.candidate || entry.skill || "forge-job")), 80);
           const stateRaw = String(entry.state || entry.status || entry.phase || "pending").toLowerCase();
           let status: SkillNexusItem["status"] = "pending";
           if (stateRaw === "promoted" || stateRaw === "installed" || stateRaw === "complete" || stateRaw === "done") status = "ok";
@@ -58,7 +58,7 @@ export const skillForgeAdapter: SkillNexusAdapter = {
           items.push({
             id: shortHash(`${name}|${entry.id || ""}|${entry.timestamp || ""}`),
             name,
-            description: clampText(String(entry.reason || entry.summary || entry.note || ""), 200),
+            description: clampText(redactAgentNames(String(entry.reason || entry.summary || entry.note || "")), 200),
             mtime: Number(entry.timestamp || entry.updatedAt || read.mtime) || read.mtime,
             status,
             tags: ["forge", stateRaw],
