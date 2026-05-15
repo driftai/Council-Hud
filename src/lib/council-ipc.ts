@@ -3,23 +3,8 @@ import "server-only";
 import { spawn } from "node:child_process";
 import { promises as fs } from "node:fs";
 
-const WSL_DISTRO = process.env.COUNCIL_WSL_DISTRO || "Ubuntu";
-const WSL_USER = process.env.COUNCIL_WSL_USER || "linux-user";
-const WSL_WORKSPACE = process.env.COUNCIL_WSL_WORKSPACE || "/home/linux-user/.openclaw/workspace";
-const WSL_HUB_SCRIPT = process.env.COUNCIL_WSL_HUB_SCRIPT
-  || "/home/linux-user/.npm-global/lib/node_modules/xihe-jianmu-ipc/hub.mjs";
-const HUB_URL = process.env.COUNCIL_HUB_URL || "http://10.255.255.254:3179";
-const WORKSPACE_UNC = process.env.COUNCIL_WORKSPACE_UNC
-  || "\\\\wsl.localhost\\Ubuntu\\home\\linux-user\\.openclaw\\workspace";
-// Read the universal IPC journal — every council packet (drift, eve, prime, echo, vesper, meru, bridges)
-// lands here. Per-agent inboxes like nova-inbox.jsonl only contain that agent's filtered slice and go
-// stale whenever the agent disconnects.
-const INBOX_JSONL = process.env.COUNCIL_INBOX_JSONL
-  || `${WORKSPACE_UNC}\\logs\\council-journal.jsonl`;
-// When the live journal has just rotated and is small, fall back to the previous file so the HUD
-// still shows recent context.
-const INBOX_JSONL_ROLLOVER = process.env.COUNCIL_INBOX_JSONL_PREV
-  || `${INBOX_JSONL}.1`;
+import { loadCouncilConfig, type AgentMode } from "@/lib/council-config";
+
 const TAIL_BYTES = 512 * 1024;
 const ROLLOVER_MIN_BYTES = 4 * 1024;
 
@@ -27,7 +12,7 @@ export type CouncilSession = {
   name: string;
   agent: string;
   role: string;
-  mode: "operator" | "live" | "viewer" | "bridge";
+  mode: AgentMode;
   connectedAt: number;
   topics: string[];
 };
@@ -43,28 +28,17 @@ export type CouncilMessage = {
   priority: boolean;
 };
 
-const AGENT_PROFILES: Record<string, Pick<CouncilSession, "role" | "mode">> = {
-  drift: { role: "Operator", mode: "operator" },
-  eve: { role: "OpenClaw Live", mode: "live" },
-  prime: { role: "OpenClaw Live", mode: "live" },
-  echo: { role: "OpenClaw Live", mode: "live" },
-  vesper: { role: "OpenClaw Live", mode: "live" },
-  meru: { role: "Hermes Live", mode: "live" },
-  iris: { role: "Viewer Bridge", mode: "viewer" },
-  nova: { role: "Viewer Bridge", mode: "viewer" },
-  astro: { role: "Viewer Bridge", mode: "viewer" },
-};
-
 function normalizeAgentName(sessionName: string) {
   return sessionName.replace(/-bridge$/i, "").toLowerCase();
 }
 
 export function normalizeCouncilSessions(sessions: any[]): CouncilSession[] {
+  const profiles = loadCouncilConfig().council.agents;
   return (Array.isArray(sessions) ? sessions : [])
     .map((session) => {
       const name = typeof session?.name === "string" ? session.name : "unknown";
       const agent = normalizeAgentName(name);
-      const profile = AGENT_PROFILES[agent] || {
+      const profile = profiles[agent] || {
         role: name.endsWith("-bridge") ? "Council Bridge" : "Council Session",
         mode: name.endsWith("-bridge") ? "bridge" as const : "live" as const,
       };
@@ -85,10 +59,11 @@ export function normalizeCouncilSessions(sessions: any[]): CouncilSession[] {
 }
 
 function runWslPython(script: string, input?: unknown, timeoutMs = 6000) {
+  const cfg = loadCouncilConfig();
   return new Promise<string>((resolve, reject) => {
     const child = spawn(
       "wsl.exe",
-      ["-d", WSL_DISTRO, "--cd", WSL_WORKSPACE, "--", "python3", "-c", script],
+      ["-d", cfg.wsl.distro, "--cd", cfg.wsl.workspaceDir, "--", "python3", "-c", script],
       { windowsHide: true }
     );
     let stdout = "";
@@ -125,7 +100,8 @@ function runWslPython(script: string, input?: unknown, timeoutMs = 6000) {
 }
 
 export async function fetchCouncilHealth() {
-  const healthUrl = `${HUB_URL}/health`;
+  const cfg = loadCouncilConfig();
+  const healthUrl = `${cfg.hub.url}/health`;
   const script = `
 import json
 import sys
@@ -144,7 +120,7 @@ except Exception as exc:
     sessions: normalizeCouncilSessions(data.sessions || []),
     uptime: Number(data.uptime || 0),
     error: typeof data.error === "string" ? data.error : null,
-    hubUrl: HUB_URL,
+    hubUrl: cfg.hub.url,
   };
 }
 
@@ -167,34 +143,38 @@ function buildMessageId(message: CouncilMessage, index: number) {
 }
 
 async function readJournalRaw(): Promise<{ raw: string; sources: string[] }> {
+  const cfg = loadCouncilConfig();
+  const live_path = cfg.journal.inboxPath;
+  const rollover_path = cfg.journal.rolloverPath;
   let live = "";
   let liveError: unknown = null;
   try {
-    live = await readTail(INBOX_JSONL);
+    live = await readTail(live_path);
   } catch (error) {
     liveError = error;
   }
 
   const liveBytes = Buffer.byteLength(live, "utf8");
   if (liveBytes >= ROLLOVER_MIN_BYTES) {
-    return { raw: live, sources: [INBOX_JSONL] };
+    return { raw: live, sources: [live_path] };
   }
 
   let rollover = "";
   try {
-    rollover = await readTail(INBOX_JSONL_ROLLOVER);
+    rollover = await readTail(rollover_path);
   } catch {
     if (liveError && !live) throw liveError;
-    return { raw: live, sources: [INBOX_JSONL] };
+    return { raw: live, sources: [live_path] };
   }
 
   const combined = live ? `${rollover}\n${live}` : rollover;
-  return { raw: combined, sources: [INBOX_JSONL_ROLLOVER, INBOX_JSONL] };
+  return { raw: combined, sources: [rollover_path, live_path] };
 }
 
 export async function readCouncilMessages(limit = 80) {
+  const cfg = loadCouncilConfig();
   let raw = "";
-  let sources: string[] = [INBOX_JSONL];
+  let sources: string[] = [cfg.journal.inboxPath];
   try {
     const result = await readJournalRaw();
     raw = result.raw;
@@ -202,7 +182,7 @@ export async function readCouncilMessages(limit = 80) {
   } catch {
     return {
       messages: [] as CouncilMessage[],
-      source: INBOX_JSONL,
+      source: cfg.journal.inboxPath,
       error: "Council journal is not readable yet.",
     };
   }
@@ -243,7 +223,7 @@ export async function readCouncilMessages(limit = 80) {
 
 export async function sendCouncilMessage({
   content,
-  from = "operator",
+  from,
   to = "*",
   topic = "council",
   kind = "chat",
@@ -254,10 +234,12 @@ export async function sendCouncilMessage({
   topic?: string | null;
   kind?: string;
 }) {
-  const sendUrl = `${HUB_URL}/send`;
-  const tokenPath = `${WSL_WORKSPACE}/secrets/ipc-auth-token`;
+  const cfg = loadCouncilConfig();
+  const sender = from ?? cfg.council.defaultSender;
+  const sendUrl = `${cfg.hub.url}/send`;
+  const tokenPath = `${cfg.wsl.workspaceDir}/secrets/ipc-auth-token`;
   const payload: Record<string, string> = {
-    from,
+    from: sender,
     to,
     content,
     kind,
@@ -296,21 +278,20 @@ with urllib.request.urlopen(request, timeout=5) as response:
 // Local-only orchestration helpers that drive the WSL-side IPC hub + bridges. The HTTP routes
 // using these guard with canUseLocalCouncilApi, so this never gets reached from a remote browser.
 // Responses below are deliberately sanitised — no absolute paths, no auth tokens, no raw stderr.
-
-const IPC_BRIDGE_TARGETS = [
-  { agent: "agent-a", launcher: "council-agent-a" as const, fallbackScript: "agent-a-bridge.py" },
-  { agent: "agent-b", launcher: "council-agent-b" as const, fallbackScript: "agent-b-bridge.py" },
-  { agent: "agent-c", launcher: "council-agent-c" as const, fallbackScript: "agent-c-bridge.py" },
-  // council-agent-d is a send helper rather than a launcher in the upstream scripts dir, so
-  // we always use the daemon path for vesper.
-  { agent: "agent-d", launcher: null, fallbackScript: "agent-d-bridge.py" },
-] as const;
+//
+// Bridge identity (which agents to spawn, launcher script names, fallback python script) is
+// loaded from council.config.local.json so the public repo carries only generic placeholders.
 
 function runWslBash(commands: string[], timeoutMs = 10000) {
+  const cfg = loadCouncilConfig();
+  // Quoting via `bash -lc "<one big string>"` is fragile across the wsl.exe boundary —
+  // single-quote contents (like awk's `$1`) can still get re-interpreted depending on how
+  // wsl.exe reassembles argv on the Linux side. Send the script over stdin instead so bash
+  // parses it like a normal script with no extra escaping layer.
   return new Promise<{ stdout: string; stderr: string; code: number | null }>((resolve) => {
     const child = spawn(
       "wsl.exe",
-      ["-d", WSL_DISTRO, "-u", WSL_USER, "--", "bash", "-lc", commands.join("; ")],
+      ["-d", cfg.wsl.distro, "-u", cfg.wsl.user, "--", "bash"],
       { windowsHide: true }
     );
     let stdout = "";
@@ -323,15 +304,33 @@ function runWslBash(commands: string[], timeoutMs = 10000) {
       clearTimeout(timer);
       resolve({ stdout, stderr, code });
     });
+
+    child.stdin.write(commands.join("\n") + "\n");
+    child.stdin.end();
   });
 }
 
 function detachedWslBash(commands: string[]) {
+  const cfg = loadCouncilConfig();
   // start_new_session-style detach: child runs independently of the wsl.exe parent so it
   // survives once this Node handler returns to the client.
   const child = spawn(
     "wsl.exe",
-    ["-d", WSL_DISTRO, "-u", WSL_USER, "--", "bash", "-lc", commands.join("; ")],
+    ["-d", cfg.wsl.distro, "-u", cfg.wsl.user, "--", "bash", "-lc", commands.join("; ")],
+    { windowsHide: true, detached: true, stdio: "ignore" }
+  );
+  child.unref();
+}
+
+// Run a single long-lived daemon inside WSL. Unlike detachedWslBash this spawns wsl.exe with
+// the daemon command directly (no bash one-liner), so wsl.exe's lifetime is tied to the
+// daemon's. The Node process detaches via spawn options, so the chain wsl.exe → daemon
+// outlives the HTTP handler that started it.
+function spawnWslDaemon(daemonArgs: string[]) {
+  const cfg = loadCouncilConfig();
+  const child = spawn(
+    "wsl.exe",
+    ["-d", cfg.wsl.distro, "-u", cfg.wsl.user, "--", ...daemonArgs],
     { windowsHide: true, detached: true, stdio: "ignore" }
   );
   child.unref();
@@ -360,16 +359,21 @@ export type IpcStackStatus = {
 };
 
 export async function getIpcStackStatus(): Promise<IpcStackStatus> {
-  // pgrep returns one line per match; we only care about counts per bridge name so we keep it cheap.
-  const probes = IPC_BRIDGE_TARGETS.map((target) => (
-    `echo --${target.agent} && pgrep -fa ${target.fallbackScript} 2>/dev/null | wc -l`
+  const cfg = loadCouncilConfig();
+  const bridgeTargets = cfg.council.bridges;
+  // CAREFUL — any `pgrep -f <pattern>` here also matches its own orchestrating bash, because
+  // the pattern string lives in the bash one-liner's argv. Instead we scan `ps -eo args` and
+  // filter on the *first column* (the executable name): only count rows whose argv[0] is
+  // python3/node, which automatically excludes shells, pgrep, awk and ps themselves.
+  const probes = bridgeTargets.map((target) => (
+    `echo --${target.agent} && ps -eo args 2>/dev/null | awk '/${target.fallbackScript.replace(".", "\\.")}/ && $1 ~ /python/ {n++} END {print n+0}'`
   ));
   const checkScript = [
     "echo --hub-proc",
-    "pgrep -fa hub.mjs 2>/dev/null | wc -l",
+    `ps -eo args 2>/dev/null | awk '/hub\\.mjs/ && $1 ~ /node/ {n++} END {print n+0}'`,
     ...probes,
     "echo --hub-reach",
-    `curl -s -o /dev/null -w "%{http_code}" --max-time 2 ${HUB_URL.replace(/[$"`\\]/g, "")} 2>/dev/null || echo 000`,
+    `curl -s -o /dev/null -w "%{http_code}" --max-time 2 ${cfg.hub.url.replace(/[$"`\\]/g, "")} 2>/dev/null || echo 000`,
   ];
   const { stdout } = await runWslBash(checkScript, 6000);
   const sections = stdout.split(/--([\w-]+)\n/).filter(Boolean);
@@ -382,7 +386,7 @@ export async function getIpcStackStatus(): Promise<IpcStackStatus> {
 
   const hubCount = Number(data.get("hub-proc") || "0");
   const hubReachCode = Number((data.get("hub-reach") || "000").split(/\s+/).pop());
-  const bridges = IPC_BRIDGE_TARGETS.map((target) => ({
+  const bridges = bridgeTargets.map((target) => ({
     agent: target.agent,
     running: Number(data.get(target.agent) || "0") > 0,
   }));
@@ -395,36 +399,49 @@ export async function getIpcStackStatus(): Promise<IpcStackStatus> {
 }
 
 export async function startIpcStack(): Promise<{ ok: boolean; message: string; status: IpcStackStatus }> {
-  // Step 1: flip MCP configs back on via the upstream toggle script. Best-effort; missing script
-  // shouldn't block subsequent steps.
+  const cfg = loadCouncilConfig();
+  const bridgeTargets = cfg.council.bridges;
+  // Step 1: flip MCP configs back on via the upstream toggle script. Best-effort.
   await runWslBash([
-    `bash ${WSL_WORKSPACE}/scripts/ipc-toggle.sh on 2>&1 || true`,
+    `bash ${cfg.wsl.workspaceDir}/scripts/ipc-toggle.sh on 2>&1 || true`,
   ], 15000);
 
-  // Step 2: spawn the hub as a detached process so it outlives this handler.
-  detachedWslBash([
-    `if ! pgrep -f 'hub.mjs' >/dev/null 2>&1; then nohup node ${WSL_HUB_SCRIPT} </dev/null >/dev/null 2>&1 & disown; fi`,
-  ]);
+  // Step 2: probe what's already running so we don't spawn duplicates.
+  const initial = await getIpcStackStatus();
 
-  // Step 3: spawn each bridge using the council-* launcher when available, otherwise route the
-  // python script through bridge-ensure-one with an absolute path (works around the watchdog's
-  // 'scripts/scripts/...' double-prefix bug on the agent side).
-  for (const target of IPC_BRIDGE_TARGETS) {
-    const cmd = target.launcher
-      ? `${WSL_WORKSPACE}/scripts/${target.launcher} council`
-      : `python3 ${WSL_WORKSPACE}/scripts/bridge-ensure-one.py ${WSL_WORKSPACE}/scripts/${target.fallbackScript} --topic council --daemon`;
-    detachedWslBash([
-      `if ! pgrep -f '${target.fallbackScript}' >/dev/null 2>&1; then nohup ${cmd} </dev/null >/dev/null 2>&1 & disown; fi`,
-    ]);
+  // Step 3: spawn the hub as wsl.exe → node so the daemon's lifetime keeps wsl.exe alive.
+  // Bash-and-nohup style detachment was tearing down before the daemon registered, killing
+  // the process tree.
+  if (!initial.hubRunning) {
+    spawnWslDaemon(["node", cfg.wsl.hubScript]);
   }
 
-  // Step 4: give everything a moment, then probe state.
-  await new Promise((resolve) => setTimeout(resolve, 4500));
+  // Step 4: spawn each bridge that isn't already alive. council-* launchers daemonize via
+  // python's --daemon flag (fork+setsid), bridge-ensure-one.py forks via start_new_session,
+  // so both survive wsl.exe exit on their own merit once they've forked.
+  for (const target of bridgeTargets) {
+    const existing = initial.bridges.find((bridge) => bridge.agent === target.agent);
+    if (existing?.running) continue;
+
+    if (target.launcher) {
+      spawnWslDaemon(["bash", "-c", `${cfg.wsl.workspaceDir}/scripts/${target.launcher} council`]);
+    } else {
+      spawnWslDaemon([
+        "python3",
+        `${cfg.wsl.workspaceDir}/scripts/bridge-ensure-one.py`,
+        `${cfg.wsl.workspaceDir}/scripts/${target.fallbackScript}`,
+        "--topic", "council", "--daemon",
+      ]);
+    }
+  }
+
+  // Step 5: wait + verify with a fresh status probe.
+  await new Promise((resolve) => setTimeout(resolve, 5000));
   const status = await getIpcStackStatus();
   const liveBridges = status.bridges.filter((bridge) => bridge.running).length;
   return {
-    ok: status.hubReachable && liveBridges === IPC_BRIDGE_TARGETS.length,
-    message: sanitizeBootMessage(`Hub ${status.hubRunning ? "up" : "down"} · ${liveBridges}/${IPC_BRIDGE_TARGETS.length} bridges live`),
+    ok: status.hubReachable && liveBridges === bridgeTargets.length,
+    message: sanitizeBootMessage(`Hub ${status.hubRunning ? "up" : "down"} · ${liveBridges}/${bridgeTargets.length} bridges live`),
     status,
   };
 }
@@ -432,12 +449,26 @@ export async function startIpcStack(): Promise<{ ok: boolean; message: string; s
 export async function stopIpcStack(): Promise<{ ok: boolean; message: string; status: IpcStackStatus }> {
   // Best-effort shutdown: try the upstream off script first (clears MCP configs), then sweep any
   // stragglers. Either path is allowed to fail — we still report whatever the final state is.
+  //
+  // CAREFUL: a naïve `pkill -f 'bridge.py'` here matches its own parent bash because the cmdline
+  // of `bash -lc "...; pkill -f 'bridge.py'; ..."` contains the literal string "bridge.py" in the
+  // pkill argument — the bash gets SIGTERM'd before the trailing commands run. Same shape as the
+  // getIpcStackStatus self-match: derive PIDs via `ps + awk` filtered on argv[0]=python3/node so
+  // shells/awk/grep/pkill themselves are excluded by executable name, not by pattern matching.
+  const sweep = [
+    `for pid in $(ps -eo pid,args 2>/dev/null | awk '/-bridge\\.py/ && $2 ~ /python/ {print $1}'); do kill -TERM "$pid" 2>/dev/null || true; done`,
+    `for pid in $(ps -eo pid,args 2>/dev/null | awk '/hub\\.mjs/ && $2 ~ /node/ {print $1}'); do kill -TERM "$pid" 2>/dev/null || true; done`,
+  ];
+  const cfg = loadCouncilConfig();
   const { stdout, stderr } = await runWslBash([
-    `bash ${WSL_WORKSPACE}/scripts/ipc-toggle.sh off 2>&1 || true`,
-    `pkill -f 'bridge.py' 2>/dev/null || true`,
-    `pkill -f 'hub.mjs' 2>/dev/null || true`,
+    `bash ${cfg.wsl.workspaceDir}/scripts/ipc-toggle.sh off 2>&1 || true`,
+    ...sweep,
+    `sleep 1`,
+    // Second pass with SIGKILL for anything that refused SIGTERM.
+    sweep[0].replace("-TERM", "-KILL"),
+    sweep[1].replace("-TERM", "-KILL"),
     `echo done`,
-  ], 15000);
+  ], 20000);
 
   await new Promise((resolve) => setTimeout(resolve, 1500));
   const status = await getIpcStackStatus();

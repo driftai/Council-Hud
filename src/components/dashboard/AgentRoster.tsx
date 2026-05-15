@@ -247,7 +247,7 @@ export function AgentRoster() {
         <div className="mb-2 rounded border border-primary/30 bg-primary/5 p-2 font-mono text-[10px] text-foreground">
           <p className="mb-2 leading-relaxed">
             {confirmIntent === "start"
-              ? "Start the IPC hub and all agent bridges? This boots the WSL-side hub.mjs and spawns eve/prime/echo/vesper daemons."
+              ? "Start the IPC hub and all agent bridges? This boots the WSL-side hub.mjs and spawns each configured bridge daemon."
               : "Stop the IPC stack? This kills hub.mjs and every bridge daemon. The agents stay alive but stop receiving council messages."}
           </p>
           <div className="flex justify-end gap-2">

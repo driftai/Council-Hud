@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { sendCouncilMessage } from "@/lib/council-ipc";
+import { loadCouncilConfig } from "@/lib/council-config";
 import { canUseLocalCouncilApi } from "@/lib/local-api-guard";
 
 export const runtime = "nodejs";
@@ -35,9 +36,10 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ ok: false, error: "Council message is too long." }, { status: 400 });
   }
 
-  const from = cleanName(body?.from, "operator");
+  const cfg = loadCouncilConfig();
+  const from = cleanName(body?.from, cfg.council.defaultSender);
   const scope = VALID_SCOPES.has(String(body?.scope || "")) ? String(body.scope) : "topic";
-  const to = scope === "dm" ? cleanName(body?.to, "agent-e-bridge") : "*";
+  const to = scope === "dm" ? cleanName(body?.to, cfg.council.defaultDmTarget) : "*";
   // The IPC hub fans out by topic — even broadcasts must carry one or they get silently dropped.
   // DMs ride on a private channel (no topic).
   const topic = scope === "dm" ? null : cleanTopic(body?.topic, "council");

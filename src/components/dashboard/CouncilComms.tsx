@@ -77,15 +77,31 @@ function formatMessageTime(timestamp: string) {
   return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }
 
-function getSenderClass(sender: string) {
+type AgentIdentity = {
+  defaultSender: string;
+  defaultDmTarget: string;
+  agents: Record<string, { role: string; mode: "operator" | "live" | "viewer" | "bridge" }>;
+};
+
+const MODE_COLOR_CLASS: Record<string, string> = {
+  operator: "text-primary",
+  live: "text-secondary",
+  viewer: "text-fuchsia-300",
+  bridge: "text-muted-foreground",
+};
+
+function senderClass(sender: string, identity: AgentIdentity | null, sessionsByAgent: Map<string, "operator" | "live" | "viewer" | "bridge">): string {
   const normalized = sender.toLowerCase().replace(/-bridge$/, "");
-  if (normalized === "operator") return "text-primary";
-  if (normalized === "viewer-b" || normalized === "viewer-a" || normalized === "viewer-c") return "text-fuchsia-300";
-  if (["agent-a", "agent-b", "agent-c", "agent-d", "agent-e"].includes(normalized)) return "text-secondary";
+  // First try the live session table — most authoritative.
+  const sessionMode = sessionsByAgent.get(normalized);
+  if (sessionMode) return MODE_COLOR_CLASS[sessionMode] || "text-muted-foreground";
+  // Fall back to identity config (covers agents that aren't currently linked).
+  const profile = identity?.agents?.[normalized];
+  if (profile) return MODE_COLOR_CLASS[profile.mode] || "text-muted-foreground";
   return "text-muted-foreground";
 }
 
-function cleanSessionName(value: string, fallback = "operator") {
+function cleanSessionName(value: string, fallback: string) {
   const cleaned = value.trim().replace(/[^A-Za-z0-9_.-]/g, "").slice(0, 40);
   return cleaned || fallback;
 }
@@ -115,10 +131,9 @@ function messageMatchesScope(message: CouncilMessage, scope: Scope, sessionName:
   }
   if (scope === "dm") {
     const cleanTarget = cleanSessionName(target, "target");
+    // Match messages between the user's session and the chosen DM target either direction.
     return (message.sender === sessionName && message.to === cleanTarget)
-      || (message.sender === cleanTarget && message.to === sessionName)
-      || (message.sender === cleanTarget && message.to === "operator")
-      || (message.sender === "operator" && message.to === cleanTarget);
+      || (message.sender === cleanTarget && message.to === sessionName);
   }
   // Broadcast = any message addressed to "*" regardless of topic. The hub requires a topic for
   // fanout, so broadcasts carry topic="council" by default; show them here too.
@@ -130,10 +145,11 @@ export function CouncilComms() {
   const [messages, setMessages] = useState<CouncilMessage[]>([]);
   const [pendingMessages, setPendingMessages] = useState<CouncilMessage[]>([]);
   const [draft, setDraft] = useState("");
+  const [identity, setIdentity] = useState<AgentIdentity | null>(null);
   const [sessionName, setSessionName] = useState("operator");
   const [sessionDraft, setSessionDraft] = useState("operator");
   const [scope, setScope] = useState<Scope>("topic");
-  const [target, setTarget] = useState("agent-e-bridge");
+  const [target, setTarget] = useState("live-agent-bridge");
   const [topic, setTopic] = useState("council");
   const [kind, setKind] = useState("chat");
   const [clearBefore, setClearBefore] = useState(0);
@@ -206,17 +222,38 @@ export function CouncilComms() {
     }
   }, [loadMessages, loadStatus]);
 
+  // Fetch identity defaults (default sender, default DM target, agent mode lookup) from the
+  // server. Falls back to placeholder strings if the endpoint isn't reachable. Real names live
+  // in council.config.local.json (gitignored).
   useEffect(() => {
-    const storedSession = cleanSessionName(window.localStorage.getItem(SESSION_STORAGE_KEY) || "operator");
-    const storedScope = window.localStorage.getItem(SCOPE_STORAGE_KEY);
-    const storedTopic = cleanTopicName(window.localStorage.getItem(TOPIC_STORAGE_KEY) || "council");
-    const storedTarget = cleanSessionName(window.localStorage.getItem(TARGET_STORAGE_KEY) || "agent-e-bridge", "agent-e-bridge");
-
-    setSessionName(storedSession);
-    setSessionDraft(storedSession);
-    setScope(storedScope === "dm" || storedScope === "broadcast" ? storedScope : "topic");
-    setTopic(storedTopic);
-    setTarget(storedTarget);
+    let cancelled = false;
+    (async () => {
+      try {
+        const response = await fetch("/api/council/identity", { cache: "no-store" });
+        const data = await response.json().catch(() => ({}));
+        if (!cancelled && data?.ok && data.identity) {
+          const next = data.identity as AgentIdentity;
+          setIdentity(next);
+          // Hydrate session/target from localStorage if present, else from identity defaults.
+          const storedSession = window.localStorage.getItem(SESSION_STORAGE_KEY);
+          const storedTarget = window.localStorage.getItem(TARGET_STORAGE_KEY);
+          const storedScope = window.localStorage.getItem(SCOPE_STORAGE_KEY);
+          const storedTopic = window.localStorage.getItem(TOPIC_STORAGE_KEY);
+          const sessionFallback = next.defaultSender;
+          const targetFallback = next.defaultDmTarget;
+          const sessionValue = cleanSessionName(storedSession || sessionFallback, sessionFallback);
+          const targetValue = cleanSessionName(storedTarget || targetFallback, targetFallback);
+          setSessionName(sessionValue);
+          setSessionDraft(sessionValue);
+          setTarget(targetValue);
+          setScope(storedScope === "dm" || storedScope === "broadcast" ? storedScope : "topic");
+          setTopic(cleanTopicName(storedTopic || "council"));
+        }
+      } catch {
+        /* swallow — fall back to whatever defaults we already have */
+      }
+    })();
+    return () => { cancelled = true; };
   }, []);
 
   useEffect(() => {
@@ -225,10 +262,11 @@ export function CouncilComms() {
   }, [activeClearKey]);
 
   useEffect(() => {
+    if (!identity) return;
     window.localStorage.setItem(SCOPE_STORAGE_KEY, scope);
     window.localStorage.setItem(TOPIC_STORAGE_KEY, cleanTopicName(topic));
-    window.localStorage.setItem(TARGET_STORAGE_KEY, cleanSessionName(target, "agent-e-bridge"));
-  }, [scope, target, topic]);
+    window.localStorage.setItem(TARGET_STORAGE_KEY, cleanSessionName(target, identity.defaultDmTarget));
+  }, [scope, target, topic, identity]);
 
   useEffect(() => {
     let cancelled = false;
@@ -268,6 +306,16 @@ export function CouncilComms() {
   }, [sessionName, status.sessions]);
 
   const scopeLabel = scope === "topic" ? `#${cleanTopicName(topic)}` : scope === "dm" ? `DM: ${target}` : "Broadcast";
+  // Build a quick agent → mode lookup so message rendering can color sender names without
+  // hardcoding identity. Live sessions win; identity config covers offline agents.
+  const sessionsByAgent = useMemo(() => {
+    const map = new Map<string, "operator" | "live" | "viewer" | "bridge">();
+    for (const session of status.sessions) {
+      if (session.agent) map.set(session.agent.toLowerCase(), session.mode);
+    }
+    return map;
+  }, [status.sessions]);
+
   const allMessages = useMemo(() => {
     const merged = [...messages, ...pendingMessages]
       .filter((message) => messageMatchesScope(message, scope, sessionName, topic, target))
@@ -313,7 +361,7 @@ export function CouncilComms() {
   }, [allMessages.length]);
 
   const applySessionName = () => {
-    const cleaned = cleanSessionName(sessionDraft);
+    const cleaned = cleanSessionName(sessionDraft, identity?.defaultSender || "operator");
     setSessionName(cleaned);
     setSessionDraft(cleaned);
     window.localStorage.setItem(SESSION_STORAGE_KEY, cleaned);
@@ -644,7 +692,7 @@ export function CouncilComms() {
               allMessages.map((message) => (
                 <div key={message.id} className={cn("rounded border p-2", message.pending ? "border-primary/20 bg-primary/5" : "border-white/10 bg-white/[0.03]")}>
                   <div className="mb-1 flex items-center justify-between gap-2 font-mono text-[8px] uppercase">
-                    <span className={cn("truncate font-bold", getSenderClass(message.sender))}>
+                    <span className={cn("truncate font-bold", senderClass(message.sender, identity, sessionsByAgent))}>
                       {message.sender}
                     </span>
                     <div className="flex shrink-0 items-center gap-1 text-muted-foreground">

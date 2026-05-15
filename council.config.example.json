@@ -1,0 +1,40 @@
+{
+  "//": [
+    "Generic council layout. Copy to council.config.local.json and fill in real agent names,",
+    "linux usernames, and WSL paths there — that file is gitignored and stays private.",
+    "All fields are optional; anything missing falls back to env vars then to placeholders."
+  ],
+  "wsl": {
+    "distro": "Ubuntu",
+    "user": "linux-user",
+    "workspaceDir": "/home/linux-user/.openclaw/workspace",
+    "hubScript": "/home/linux-user/.npm-global/lib/node_modules/xihe-jianmu-ipc/hub.mjs"
+  },
+  "hub": {
+    "url": "http://10.255.255.254:3179"
+  },
+  "council": {
+    "defaultSender": "operator",
+    "defaultDmTarget": "live-agent-1-bridge",
+    "agents": {
+      "operator":      { "role": "Operator",      "mode": "operator" },
+      "live-agent-1":  { "role": "Council Live",  "mode": "live" },
+      "live-agent-2":  { "role": "Council Live",  "mode": "live" },
+      "viewer-agent":  { "role": "Viewer Bridge", "mode": "viewer" }
+    },
+    "bridges": [
+      { "agent": "live-agent-1", "launcher": "council-live-agent-1", "fallbackScript": "live-agent-1-bridge.py" },
+      { "agent": "live-agent-2", "launcher": "council-live-agent-2", "fallbackScript": "live-agent-2-bridge.py" }
+    ]
+  },
+  "journal": {
+    "inboxPath": "\\\\wsl.localhost\\Ubuntu\\home\\linux-user\\.openclaw\\workspace\\logs\\council-journal.jsonl",
+    "rolloverPath": "\\\\wsl.localhost\\Ubuntu\\home\\linux-user\\.openclaw\\workspace\\logs\\council-journal.jsonl.1"
+  },
+  "smartFallback": {
+    "enginePath": "/home/linux-user/.openclaw/workspace/smart-fallback-v5/engine.py",
+    "healthFile": "\\\\wsl.localhost\\Ubuntu\\home\\linux-user\\.openclaw\\workspace\\data\\smart-fallback-v5\\model-health.json",
+    "agents": ["live-agent-1", "live-agent-2"],
+    "defaultAgent": "live-agent-1"
+  }
+}

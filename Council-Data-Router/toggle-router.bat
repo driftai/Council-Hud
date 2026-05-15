@@ -4,10 +4,22 @@ setlocal EnableExtensions
 set "ROUTER_DIR=%~dp0"
 for %%I in ("%ROUTER_DIR%..") do set "ROOT_DIR=%%~fI"
 set "AUTO_CHOICE=%~1"
+
+REM ------------------------------------------------------------------
+REM IPC stack identity comes from council.local.bat (gitignored) so the
+REM tracked launcher carries no real agent names or WSL paths. Copy
+REM council.local.example.bat next to this file and fill it in to enable
+REM options [7] / [8] / [9]. Without a local file, those options are
+REM disabled but the HUD + router still work fine.
+REM ------------------------------------------------------------------
 set "WSL_DISTRO=Ubuntu"
 set "WSL_USER=linux-user"
 set "IPC_HUB_PATH=/home/linux-user/.npm-global/lib/node_modules/xihe-jianmu-ipc/hub.mjs"
 set "OC_SCRIPTS=/home/linux-user/.openclaw/workspace/scripts"
+set "IPC_LAUNCHERS_AVAILABLE=0"
+if exist "%ROUTER_DIR%council.local.bat" (
+    call "%ROUTER_DIR%council.local.bat"
+)
 
 :menu
 cls
@@ -185,19 +197,27 @@ start "COUNCIL_HUD" cmd /k "cd /d ""%ROOT_DIR%"" && npm run dev"
 exit /b 0
 
 :start_ipc_stack
+if "%IPC_LAUNCHERS_AVAILABLE%"=="0" (
+    echo.
+    echo [IPC] No local bridge launchers configured.
+    echo       Copy council.local.example.bat to council.local.bat and fill in
+    echo       your real agent names + WSL paths, then re-run this option.
+    echo       The HUD's POST /api/council/ipc/start endpoint can also drive
+    echo       the stack from council.config.local.json — same data, different
+    echo       entry point.
+    pause
+    exit /b 0
+)
 echo.
 echo [IPC] Toggling MCP configs ON via ipc-toggle.sh...
 wsl.exe -d %WSL_DISTRO% -u %WSL_USER% -- bash -lc "bash %OC_SCRIPTS%/ipc-toggle.sh on"
 echo.
 echo [IPC] Launching hub in its own window...
-start "COUNCIL_IPC_HUB" wsl.exe -d %WSL_DISTRO% -u %WSL_USER% --cd "/home/linux-user/.npm-global/lib/node_modules/xihe-jianmu-ipc" -- node hub.mjs
+start "COUNCIL_IPC_HUB" wsl.exe -d %WSL_DISTRO% -u %WSL_USER% --cd "%IPC_HUB_DIR%" -- node %IPC_HUB_PATH%
 timeout /t 4 /nobreak >nul
 echo.
-echo [IPC] Launching agent bridges (eve, prime, echo, vesper)...
-start "COUNCIL_EVE_BRIDGE" /MIN wsl.exe -d %WSL_DISTRO% -u %WSL_USER% -- bash -lc "%OC_SCRIPTS%/council-agent-a council"
-start "COUNCIL_PRIME_BRIDGE" /MIN wsl.exe -d %WSL_DISTRO% -u %WSL_USER% -- bash -lc "%OC_SCRIPTS%/council-agent-b council"
-start "COUNCIL_ECHO_BRIDGE" /MIN wsl.exe -d %WSL_DISTRO% -u %WSL_USER% -- bash -lc "%OC_SCRIPTS%/council-agent-c council"
-start "COUNCIL_VESPER_BRIDGE" /MIN wsl.exe -d %WSL_DISTRO% -u %WSL_USER% -- bash -lc "python3 %OC_SCRIPTS%/bridge-ensure-one.py %OC_SCRIPTS%/agent-d-bridge.py --topic council --daemon"
+echo [IPC] Launching agent bridges from council.local.bat...
+call "%ROUTER_DIR%council.local.bat" bridges
 timeout /t 4 /nobreak >nul
 echo.
 echo [IPC] Stack started. Hub at http://127.0.0.1:3179 ^(inside WSL^).

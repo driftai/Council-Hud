@@ -52,3 +52,7 @@ Council-Data-Router/backup/
 Council-Data-Router/*.log
 Council-Data-Router/*.bak
 node_modules/
+
+# Local council identity — real agent names, WSL paths, etc.
+council.config.local.json
+Council-Data-Router/council.local.bat

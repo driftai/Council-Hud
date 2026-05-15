@@ -3,23 +3,16 @@ import "server-only";
 import { spawn } from "node:child_process";
 import { promises as fs } from "node:fs";
 
-// Smart Fallback v5 bridge — consult ~/.openclaw/workspace/smart-fallback-v5/engine.py
-// (inside WSL) to find out whether a model is currently routable, pick a replacement when it
-// isn't, and feed call outcomes back so the engine's view of HUD-side traffic stays current.
-//
-// Every call is best-effort: if WSL or the engine isn't reachable, the helpers return null and
-// the caller falls back to whatever model the user selected. We never block a chat turn on the
-// engine being available.
+import { loadCouncilConfig } from "@/lib/council-config";
 
-const WSL_DISTRO = process.env.COUNCIL_WSL_DISTRO || "Ubuntu";
-const WSL_USER = process.env.COUNCIL_WSL_USER || "linux-user";
-const ENGINE_PATH = process.env.COUNCIL_FALLBACK_ENGINE
-  || "/home/linux-user/.openclaw/workspace/smart-fallback-v5/engine.py";
-const FALLBACK_AGENT = process.env.COUNCIL_FALLBACK_AGENT || "agent-e";
-const HEALTH_FILE = process.env.COUNCIL_FALLBACK_HEALTH
-  || "\\\\wsl.localhost\\Ubuntu\\home\\linux-user\\.openclaw\\workspace\\data\\smart-fallback-v5\\model-health.json";
-const KNOWN_AGENTS = (process.env.COUNCIL_FALLBACK_AGENTS || "eve,prime,echo,vesper,meru")
-  .split(",").map((value) => value.trim()).filter(Boolean);
+// Smart Fallback v5 bridge — consult the engine.py at the configured path (inside WSL) to find
+// out whether a model is currently routable, pick a replacement when it isn't, and feed call
+// outcomes back so the engine's view of HUD-side traffic stays current.
+//
+// All paths + agent identity come from council.config.local.json (or council.config.example.json
+// if there's no local override). Every call is best-effort: if WSL or the engine isn't reachable,
+// the helpers return null and the caller falls back to whatever model the user selected. We
+// never block a chat turn on the engine being available.
 
 // We don't want a spawn-per-NVIDIA-call. Cache routability + fallback picks for ~30s. After that
 // we re-check so newly-recovered models become reachable again on their own.
@@ -62,6 +55,7 @@ function silenceEngine(reason: string) {
 
 function runEngine(args: string[], timeoutMs = CALL_TIMEOUT_MS): Promise<string | null> {
   if (isEngineSilenced()) return Promise.resolve(null);
+  const cfg = loadCouncilConfig();
   return new Promise<string | null>((resolve) => {
     let resolved = false;
     const finish = (value: string | null) => {
@@ -72,7 +66,7 @@ function runEngine(args: string[], timeoutMs = CALL_TIMEOUT_MS): Promise<string 
 
     const child = spawn(
       "wsl.exe",
-      ["-d", WSL_DISTRO, "-u", WSL_USER, "--", "python3", ENGINE_PATH, ...args],
+      ["-d", cfg.wsl.distro, "-u", cfg.wsl.user, "--", "python3", cfg.smartFallback.enginePath, ...args],
       { windowsHide: true }
     );
 
@@ -127,7 +121,12 @@ export async function checkModelRoutable(modelId: string): Promise<RoutabilityIn
   return value;
 }
 
-export async function pickFallbackModel(agent = FALLBACK_AGENT): Promise<FallbackPick | null> {
+export async function pickFallbackModel(agent?: string): Promise<FallbackPick | null> {
+  const resolvedAgent = agent || loadCouncilConfig().smartFallback.defaultAgent;
+  return pickFallbackModelInternal(resolvedAgent);
+}
+
+async function pickFallbackModelInternal(agent: string): Promise<FallbackPick | null> {
   const now = Date.now();
   const cached = pickCache.get(agent);
   if (cached && cached.expires > now) return cached.value;
@@ -153,7 +152,7 @@ export function recordModelOutcome(modelId: string, kind: OutcomeKind, value?: n
   void runEngine(args, 3000);
 }
 
-export async function resolveRoutableModel(preferredModelId: string, agent = FALLBACK_AGENT): Promise<{
+export async function resolveRoutableModel(preferredModelId: string, agent?: string): Promise<{
   model: string;
   source: "preferred" | "fallback" | "preferred-engine-silenced";
   routability?: RoutabilityInfo | null;
@@ -223,7 +222,7 @@ export async function getEngineSnapshot(): Promise<EngineSnapshot> {
 
   let raw: string;
   try {
-    raw = await fs.readFile(HEALTH_FILE, "utf8");
+    raw = await fs.readFile(loadCouncilConfig().smartFallback.healthFile, "utf8");
   } catch {
     return fallback;
   }
@@ -305,7 +304,7 @@ export async function getEngineSnapshot(): Promise<EngineSnapshot> {
     blocked,
     models: entries,
     generatedAt: Date.now(),
-    source: HEALTH_FILE,
+    source: loadCouncilConfig().smartFallback.healthFile,
   };
 }
 
@@ -319,7 +318,12 @@ export type AgentPick = {
   error?: string;
 };
 
-export async function getAgentPicks(agents: string[] = KNOWN_AGENTS): Promise<AgentPick[]> {
+export async function getAgentPicks(agents?: string[]): Promise<AgentPick[]> {
+  const resolvedAgents = agents && agents.length > 0 ? agents : loadCouncilConfig().smartFallback.agents;
+  return getAgentPicksInternal(resolvedAgents);
+}
+
+async function getAgentPicksInternal(agents: string[]): Promise<AgentPick[]> {
   const results: AgentPick[] = [];
   for (const agent of agents) {
     const pick = await pickFallbackModel(agent);
