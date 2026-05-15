@@ -7,6 +7,7 @@ import { skillRootAdapter } from "./adapters/skill-root";
 import { reportFileAdapter } from "./adapters/report-file";
 import { sessionMinerAdapter } from "./adapters/session-miner";
 import { skillForgeAdapter } from "./adapters/skill-forge";
+import { skillEvolverAdapter } from "./adapters/skill-evolver";
 import { projectDocsAdapter } from "./adapters/project-docs";
 import { syncStatusAdapter } from "./adapters/sync-status";
 import { genericJsonAdapter } from "./adapters/generic-json";
@@ -16,6 +17,7 @@ const REGISTRY: Record<string, SkillNexusAdapter> = {
   [reportFileAdapter.type]: reportFileAdapter,
   [sessionMinerAdapter.type]: sessionMinerAdapter,
   [skillForgeAdapter.type]: skillForgeAdapter,
+  [skillEvolverAdapter.type]: skillEvolverAdapter,
   [projectDocsAdapter.type]: projectDocsAdapter,
   [syncStatusAdapter.type]: syncStatusAdapter,
   [genericJsonAdapter.type]: genericJsonAdapter,

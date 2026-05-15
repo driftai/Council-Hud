@@ -11,6 +11,7 @@ import {
   Brain,
   Cog,
   Database,
+  Dna,
   FileWarning,
   Flame,
   GitBranch,
@@ -77,6 +78,7 @@ type SkillNexusReport = {
 const DOMAIN_ICONS: Record<string, any> = {
   skillRoot: Layers,
   skillForge: Flame,
+  skillEvolver: Dna,
   sessionMiner: Brain,
   reportFile: Database,
   projectDocs: GitBranch,

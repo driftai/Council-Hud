@@ -41,7 +41,7 @@
     "//": [
       "Skill Nexus is a federated registry of monitored skill-domains. Each entry below is one source",
       "the HUD will scan and surface in the Skill Nexus card. Real paths/endpoints go in council.config.local.json.",
-      "Supported types: skillRoot, sessionMiner, reportFile, projectDocs, syncStatus, genericJson, skillForge."
+      "Supported types: skillRoot, skillForge, skillEvolver, sessionMiner, reportFile, projectDocs, syncStatus, genericJson."
     ],
     "enabled": true,
     "pollIntervalMs": 20000,
@@ -63,6 +63,18 @@
         "type": "skillForge",
         "enabled": true,
         "source": { "queuePath": "/path/to/skill-forge/queue.jsonl", "outputDir": "/path/to/skill-forge/output" }
+      },
+      {
+        "id": "skill-evolver",
+        "label": "Skill Evolver",
+        "type": "skillEvolver",
+        "enabled": true,
+        "source": {
+          "skillsDir": "/path/to/skills",
+          "evolvedSuffix": "-evolved",
+          "statePath": "/path/to/evolver/state.json",
+          "appliedPath": "/path/to/evolver/applied_genome.json"
+        }
       },
       {
         "id": "session-miner",
