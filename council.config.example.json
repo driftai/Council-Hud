@@ -36,5 +36,62 @@
     "healthFile": "\\\\wsl.localhost\\Ubuntu\\home\\linux-user\\.openclaw\\workspace\\data\\smart-fallback-v5\\model-health.json",
     "agents": ["live-agent-1", "live-agent-2"],
     "defaultAgent": "live-agent-1"
+  },
+  "skillNexus": {
+    "//": [
+      "Skill Nexus is a federated registry of monitored skill-domains. Each entry below is one source",
+      "the HUD will scan and surface in the Skill Nexus card. Real paths/endpoints go in council.config.local.json.",
+      "Supported types: skillRoot, sessionMiner, reportFile, projectDocs, syncStatus, genericJson, skillForge."
+    ],
+    "enabled": true,
+    "pollIntervalMs": 20000,
+    "maxFileBytes": 524288,
+    "allowedExtensions": [".md", ".json", ".yaml", ".yml", ".txt"],
+    "ignoredGlobs": ["node_modules/**", ".git/**", "__pycache__/**"],
+    "domains": [
+      {
+        "id": "skills-library",
+        "label": "Skill Library",
+        "type": "skillRoot",
+        "enabled": true,
+        "source": { "path": "/path/to/skills" },
+        "privacyMode": "label-and-relative"
+      },
+      {
+        "id": "skill-forge",
+        "label": "Skill Forge",
+        "type": "skillForge",
+        "enabled": true,
+        "source": { "queuePath": "/path/to/skill-forge/queue.jsonl", "outputDir": "/path/to/skill-forge/output" }
+      },
+      {
+        "id": "session-miner",
+        "label": "Session Miner",
+        "type": "sessionMiner",
+        "enabled": true,
+        "source": { "outputDir": "/path/to/session-miner/output" }
+      },
+      {
+        "id": "validation-reports",
+        "label": "Validation Reports",
+        "type": "reportFile",
+        "enabled": true,
+        "source": { "path": "/path/to/skill-validation.jsonl", "format": "jsonl" }
+      },
+      {
+        "id": "project-docs",
+        "label": "Project Skill Docs",
+        "type": "projectDocs",
+        "enabled": false,
+        "source": { "path": "/path/to/project/docs/skills" }
+      },
+      {
+        "id": "sync-status",
+        "label": "Cross-Agent Sync",
+        "type": "syncStatus",
+        "enabled": false,
+        "source": { "path": "/path/to/sync-status.json" }
+      }
+    ]
   }
 }

@@ -4,6 +4,7 @@ import { SystemHealth } from "@/components/dashboard/SystemHealth";
 import { AgentRoster } from "@/components/dashboard/AgentRoster";
 import { CouncilComms } from "@/components/dashboard/CouncilComms";
 import { SmartFallback } from "@/components/dashboard/SmartFallback";
+import { SkillNexus } from "@/components/dashboard/SkillNexus";
 import { NeuralVisualizer } from "@/components/dashboard/NeuralVisualizer";
 import { KnowledgeGraph } from "@/components/dashboard/KnowledgeGraph";
 import { FileWatcher } from "@/components/dashboard/FileWatcher";
@@ -892,6 +893,9 @@ export default function Home() {
             <SmartFallback />
             <div className="xl:col-span-2">
               <CouncilComms />
+            </div>
+            <div className="xl:col-span-2">
+              <SkillNexus />
             </div>
           </div>
         </div>

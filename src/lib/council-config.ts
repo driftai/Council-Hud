@@ -23,6 +23,29 @@ export type BridgeTarget = {
   fallbackScript: string;
 };
 
+export type SkillNexusDomainConfig = {
+  id: string;
+  label: string;
+  type: string;
+  enabled?: boolean;
+  // Adapter-specific source config: path/file/endpoint/command/etc. Kept loosely-typed because
+  // each adapter validates its own shape; the registry never reads it directly.
+  source?: Record<string, any>;
+  // Controls what makes it to the API response. label-and-relative is the default — surface
+  // labels + relative paths, never absolute machine paths. label-only hides all path data.
+  // redacted hides bodies/excerpts entirely (just counts).
+  privacyMode?: "label-and-relative" | "label-only" | "redacted";
+};
+
+export type SkillNexusConfig = {
+  enabled: boolean;
+  pollIntervalMs: number;
+  maxFileBytes: number;
+  allowedExtensions: string[];
+  ignoredGlobs: string[];
+  domains: SkillNexusDomainConfig[];
+};
+
 export type CouncilConfig = {
   wsl: {
     distro: string;
@@ -49,6 +72,7 @@ export type CouncilConfig = {
     agents: string[];
     defaultAgent: string;
   };
+  skillNexus: SkillNexusConfig;
 };
 
 const CONFIG_BASE_DIR = process.cwd();
@@ -116,6 +140,14 @@ const BUILT_IN_DEFAULTS: CouncilConfig = {
     healthFile: "\\\\wsl.localhost\\Ubuntu\\home\\linux-user\\.openclaw\\workspace\\data\\smart-fallback-v5\\model-health.json",
     agents: ["live-agent-1", "live-agent-2"],
     defaultAgent: "live-agent-1",
+  },
+  skillNexus: {
+    enabled: true,
+    pollIntervalMs: 20000,
+    maxFileBytes: 524288,
+    allowedExtensions: [".md", ".json", ".yaml", ".yml", ".txt"],
+    ignoredGlobs: ["node_modules/**", ".git/**", "__pycache__/**", "*.pyc", ".venv/**", "venv/**"],
+    domains: [],
   },
 };
 
