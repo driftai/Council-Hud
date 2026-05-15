@@ -7,9 +7,12 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { cn } from "@/lib/utils";
 import {
   AlertCircle,
+  Award,
+  BarChart3,
   BookOpen,
   Boxes,
   Brain,
+  Clock,
   Cog,
   Database,
   Dna,
@@ -24,6 +27,7 @@ import {
   RefreshCcw,
   ShieldCheck,
   Sparkles,
+  TrendingUp,
   TriangleAlert,
 } from "lucide-react";
 
@@ -265,6 +269,14 @@ export function SkillNexus() {
               label="Overview"
               count={domains.length}
             />
+            <TabButton
+              active={activeTab === "insights"}
+              onClick={() => setActiveTab("insights")}
+              icon={BarChart3}
+              label="Insights"
+              count={totals?.items}
+              tone="border-primary/30 text-primary"
+            />
             {domains.map((domain) => (
               <TabButton
                 key={domain.id}
@@ -298,6 +310,9 @@ export function SkillNexus() {
           <div className={cn("min-h-0 flex-1", expanded ? "overflow-hidden" : "")}>
             {activeTab === "overview" && (
               <OverviewPanel report={report} onJumpToDomain={setActiveTab} />
+            )}
+            {activeTab === "insights" && (
+              <InsightsPanel report={report} expanded={expanded} />
             )}
             {activeTab === "issues" && (
               <IssuesPanel report={report} warnings={allWarnings} onJumpToDomain={setActiveTab} />
@@ -840,5 +855,315 @@ function InfoPanel({ report, expanded }: { report: SkillNexusReport | null; expa
         )}
       </div>
     </ScrollArea>
+  );
+}
+
+// === Insights panel ===================================================
+// Aggregate views computed client-side from the report. Surfaces what's
+// passing, what's been evolved, IMC compliance distribution, etc.
+
+function InsightsPanel({ report, expanded }: { report: SkillNexusReport | null; expanded: boolean }) {
+  const data = useMemo(() => {
+    if (!report) return null;
+
+    // Pool all items across every domain, keeping the source domain reference.
+    type Row = { item: SkillNexusItem; domain: DomainSnapshot };
+    const all: Row[] = [];
+    for (const domain of report.domains) {
+      for (const item of domain.items) all.push({ item, domain });
+    }
+
+    const skillRoots = report.domains.filter((domain) => domain.type === "skillRoot");
+    const skillItems = skillRoots.flatMap((domain) => domain.items.map((item) => ({ item, domain })))
+      .filter(({ item }) => item.tags?.includes("skill"));
+    const docItems = skillRoots.flatMap((domain) => domain.items.map((item) => ({ item, domain })))
+      .filter(({ item }) => item.tags?.includes("doc"));
+
+    // Evolution counts: every skillEvolver "evolved/paired" item contributes one evolution
+    // to its parent. Map parent → count.
+    const evolutionCounts = new Map<string, { parent: string; evolved: Row[]; bestScore: number }>();
+    for (const domain of report.domains) {
+      if (domain.type !== "skillEvolver") continue;
+      for (const item of domain.items) {
+        if (!item.tags?.includes("evolved")) continue;
+        const parent = String(item.meta?.parent || "");
+        if (!parent) continue;
+        const score = typeof item.meta?.imcScore === "number" ? item.meta.imcScore : 0;
+        const entry = evolutionCounts.get(parent) || { parent, evolved: [], bestScore: 0 };
+        entry.evolved.push({ item, domain });
+        if (score > entry.bestScore) entry.bestScore = score;
+        evolutionCounts.set(parent, entry);
+      }
+    }
+    const mostEvolved = Array.from(evolutionCounts.values())
+      .sort((a, b) => b.evolved.length - a.evolved.length || b.bestScore - a.bestScore)
+      .slice(0, 12);
+
+    // IMC distribution across every item that has imc set.
+    const imcBuckets: Record<string, number> = { full: 0, good: 0, partial: 0, poor: 0 };
+    let imcSampleCount = 0;
+    let imcScoreSum = 0;
+    for (const { item } of all) {
+      const lvl = String(item.meta?.imc || "");
+      if (lvl in imcBuckets) {
+        imcBuckets[lvl] += 1;
+        imcSampleCount += 1;
+        const score = Number(item.meta?.imcScore);
+        if (Number.isFinite(score)) imcScoreSum += score;
+      }
+    }
+    const imcAverage = imcSampleCount > 0 ? Math.round(imcScoreSum / imcSampleCount) : 0;
+
+    // Top passing items: status === "ok" or judgment === "promote", sorted by IMC score then mtime.
+    const passing = all
+      .filter(({ item }) => {
+        const status = item.status || "ok";
+        return status === "ok" || item.meta?.judgment === "promote";
+      })
+      .map(({ item, domain }) => ({
+        item,
+        domain,
+        score: typeof item.meta?.imcScore === "number" ? item.meta.imcScore : null,
+      }))
+      .filter((row) => row.score !== null)
+      .sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
+      .slice(0, 12);
+
+    // Recently changed items (last 7 days, sorted newest first).
+    const sevenDays = 7 * 86_400_000;
+    const recent = all
+      .filter(({ item }) => item.mtime && Date.now() - item.mtime < sevenDays)
+      .sort((a, b) => (b.item.mtime || 0) - (a.item.mtime || 0))
+      .slice(0, 10);
+
+    // Items per skillRoot domain — quick bar.
+    const perDomain = skillRoots.map((domain) => ({
+      label: domain.label,
+      total: domain.items.length,
+      skills: domain.items.filter((item) => item.tags?.includes("skill")).length,
+      docs: domain.items.filter((item) => item.tags?.includes("doc")).length,
+      health: domain.health,
+    }));
+
+    return {
+      totals: {
+        skillFiles: skillItems.length,
+        docFiles: docItems.length,
+        evolved: Array.from(evolutionCounts.values()).reduce((sum, entry) => sum + entry.evolved.length, 0),
+        evolvedParents: evolutionCounts.size,
+        passingWithScore: passing.length,
+        imcAverage,
+      },
+      imcBuckets,
+      imcSampleCount,
+      mostEvolved,
+      passing,
+      recent,
+      perDomain,
+    };
+  }, [report]);
+
+  if (!data) {
+    return (
+      <div className="rounded border border-white/10 bg-black/20 p-3 font-mono text-[10px] text-muted-foreground">
+        Loading insights…
+      </div>
+    );
+  }
+
+  const { totals, imcBuckets, imcSampleCount, mostEvolved, passing, recent, perDomain } = data;
+  const imcMax = Math.max(1, ...Object.values(imcBuckets));
+
+  return (
+    <ScrollArea className={cn("rounded border border-white/10 bg-black/30 p-3", expanded ? "h-[calc(100vh-22rem)]" : "h-[420px]")}>
+      <div className="space-y-4 pr-2">
+
+        {/* Headline counters */}
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+          <InsightTile icon={Layers}   label="Skill files"    value={totals.skillFiles} tone="text-primary" />
+          <InsightTile icon={Dna}      label="Evolved"        value={totals.evolved}    sub={`${totals.evolvedParents} parents`} tone="text-fuchsia-300" />
+          <InsightTile icon={Award}    label="Passing (IMC)"  value={totals.passingWithScore} sub={`avg ${totals.imcAverage}`}    tone="text-secondary" />
+          <InsightTile icon={BookOpen} label="Docs"           value={totals.docFiles}   tone="text-muted-foreground" />
+        </div>
+
+        {/* IMC distribution */}
+        <section>
+          <h4 className="mb-1 flex items-center gap-2 font-headline text-[10px] font-bold uppercase tracking-wider text-primary">
+            <Gauge className="h-3 w-3" /> IMC compliance ({imcSampleCount} scored)
+          </h4>
+          <div className="space-y-1.5">
+            {(["full", "good", "partial", "poor"] as const).map((band) => (
+              <div key={band} className="flex items-center gap-2 font-mono text-[10px]">
+                <span className={cn("w-14 shrink-0 rounded border px-1 text-center text-[8px] uppercase", IMC_TONE[band])}>
+                  {band}
+                </span>
+                <div className="relative h-2 flex-1 overflow-hidden rounded-full bg-white/5">
+                  <div
+                    className={cn(
+                      "h-full transition-all",
+                      band === "full" ? "bg-secondary/80"
+                      : band === "good" ? "bg-primary/80"
+                      : band === "partial" ? "bg-yellow-500/80"
+                      : "bg-destructive/80"
+                    )}
+                    style={{ width: `${(imcBuckets[band] / imcMax) * 100}%` }}
+                  />
+                </div>
+                <span className="w-10 shrink-0 text-right text-[9px] text-muted-foreground tabular-nums">
+                  {imcBuckets[band]}
+                </span>
+              </div>
+            ))}
+          </div>
+        </section>
+
+        {/* Top scorers */}
+        {passing.length > 0 && (
+          <section>
+            <h4 className="mb-1 flex items-center gap-2 font-headline text-[10px] font-bold uppercase tracking-wider text-primary">
+              <Award className="h-3 w-3" /> Top passing skills
+            </h4>
+            <div className="space-y-1">
+              {passing.map(({ item, domain, score }, idx) => (
+                <div key={item.id} className="flex items-center gap-2 rounded border border-white/10 bg-black/20 px-2 py-1 font-mono text-[10px]">
+                  <span className="w-5 shrink-0 text-center text-[9px] text-muted-foreground/70">#{idx + 1}</span>
+                  <span className={cn("shrink-0 inline-flex items-center gap-1 rounded border px-1.5 text-[8px] uppercase", IMC_TONE[String(item.meta?.imc || "good")] || "border-primary/30 text-primary")}>
+                    <Gauge className="h-2.5 w-2.5" />
+                    {score}
+                  </span>
+                  <span className="min-w-0 flex-1 truncate font-bold" title={item.name}>{item.name}</span>
+                  <span className="shrink-0 text-[8px] uppercase text-muted-foreground/70">{domain.label}</span>
+                  {item.meta?.judgment && (
+                    <span className="shrink-0 rounded border border-current/30 px-1 text-[8px] uppercase">{String(item.meta.judgment)}</span>
+                  )}
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
+
+        {/* Most-evolved lineage */}
+        {mostEvolved.length > 0 && (
+          <section>
+            <h4 className="mb-1 flex items-center gap-2 font-headline text-[10px] font-bold uppercase tracking-wider text-primary">
+              <TrendingUp className="h-3 w-3" /> Most-evolved parents ({totals.evolvedParents} total)
+            </h4>
+            <div className="space-y-1">
+              {mostEvolved.map((entry) => (
+                <div key={entry.parent} className="rounded border border-white/10 bg-black/20 px-2 py-1.5 font-mono text-[10px]">
+                  <div className="flex items-center gap-2">
+                    <Dna className="h-3 w-3 text-fuchsia-300" />
+                    <span className="min-w-0 flex-1 truncate font-bold" title={entry.parent}>{entry.parent}</span>
+                    <span className="shrink-0 rounded border border-fuchsia-400/40 px-1 text-[8px] uppercase text-fuchsia-300">
+                      {entry.evolved.length}× evolved
+                    </span>
+                    {entry.bestScore > 0 && (
+                      <span className={cn("shrink-0 rounded border px-1 text-[8px] uppercase", entry.bestScore >= 90 ? IMC_TONE.full : entry.bestScore >= 70 ? IMC_TONE.good : entry.bestScore >= 50 ? IMC_TONE.partial : IMC_TONE.poor)}>
+                        best {entry.bestScore}
+                      </span>
+                    )}
+                  </div>
+                  <p className="mt-0.5 flex flex-wrap gap-1 text-[8px] opacity-70">
+                    {entry.evolved.slice(0, 5).map(({ item }) => {
+                      const score = typeof item.meta?.imcScore === "number" ? item.meta.imcScore : null;
+                      const judgment = String(item.meta?.judgment || "");
+                      return (
+                        <span
+                          key={item.id}
+                          className={cn(
+                            "rounded border px-1",
+                            judgment === "promote" ? "border-secondary/40 text-secondary"
+                            : judgment === "reject" ? "border-destructive/40 text-destructive"
+                            : judgment === "revise" ? "border-yellow-500/40 text-yellow-400"
+                            : "border-current/30"
+                          )}
+                          title={item.relativePath || item.name}
+                        >
+                          {score !== null ? `${score}` : "·"} {judgment || "ok"}
+                        </span>
+                      );
+                    })}
+                    {entry.evolved.length > 5 && (
+                      <span className="rounded border border-current/30 px-1 text-muted-foreground">
+                        +{entry.evolved.length - 5} more
+                      </span>
+                    )}
+                  </p>
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
+
+        {/* Per-domain breakdown bars */}
+        <section>
+          <h4 className="mb-1 flex items-center gap-2 font-headline text-[10px] font-bold uppercase tracking-wider text-primary">
+            <Layers className="h-3 w-3" /> Skill counts per library
+          </h4>
+          <div className="space-y-1">
+            {perDomain.map((row) => {
+              const max = Math.max(1, ...perDomain.map((d) => d.total));
+              return (
+                <div key={row.label} className="font-mono text-[10px]">
+                  <div className="flex items-center justify-between">
+                    <span className="truncate" title={row.label}>{row.label}</span>
+                    <span className="text-muted-foreground tabular-nums">
+                      {row.skills} skills · {row.docs} docs
+                    </span>
+                  </div>
+                  <div className="relative mt-0.5 h-1.5 overflow-hidden rounded-full bg-white/5">
+                    <div
+                      className={cn(
+                        "h-full transition-all",
+                        row.health === "ok" ? "bg-secondary/80"
+                        : row.health === "degraded" ? "bg-yellow-500/80"
+                        : row.health === "unreachable" ? "bg-destructive/80"
+                        : "bg-white/20"
+                      )}
+                      style={{ width: `${(row.total / max) * 100}%` }}
+                    />
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </section>
+
+        {/* Recently changed */}
+        {recent.length > 0 && (
+          <section>
+            <h4 className="mb-1 flex items-center gap-2 font-headline text-[10px] font-bold uppercase tracking-wider text-primary">
+              <Clock className="h-3 w-3" /> Changed in last 7 days
+            </h4>
+            <div className="space-y-1">
+              {recent.map(({ item, domain }) => (
+                <div key={`recent-${item.id}`} className="flex items-center gap-2 rounded border border-white/10 bg-black/20 px-2 py-1 font-mono text-[10px]">
+                  <span className={cn("shrink-0 rounded border px-1 text-[8px] uppercase", STATUS_TONE[item.status || "ok"])}>
+                    {item.status || "ok"}
+                  </span>
+                  <span className="min-w-0 flex-1 truncate" title={item.name}>{item.name}</span>
+                  <span className="shrink-0 text-[8px] uppercase text-muted-foreground/70">{domain.label}</span>
+                  <span className="shrink-0 text-[8px] text-muted-foreground">{formatAgo(item.mtime || 0)}</span>
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
+
+      </div>
+    </ScrollArea>
+  );
+}
+
+function InsightTile({ icon: Icon, label, value, sub, tone }: { icon: any; label: string; value: number; sub?: string; tone: string }) {
+  return (
+    <div className="rounded border border-white/10 bg-black/20 px-2 py-2 font-mono">
+      <div className="flex items-center gap-1 text-[9px] uppercase text-muted-foreground">
+        <Icon className={cn("h-3 w-3", tone)} />
+        <span>{label}</span>
+      </div>
+      <p className={cn("mt-1 text-base font-bold", tone)}>{value}</p>
+      {sub && <p className="text-[8px] uppercase tracking-wider text-muted-foreground/80">{sub}</p>}
+    </div>
   );
 }
