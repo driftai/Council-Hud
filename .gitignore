@@ -56,3 +56,8 @@ node_modules/
 # Local council identity — real agent names, WSL paths, etc.
 council.config.local.json
 Council-Data-Router/council.local.bat
+
+# History-scrub artifacts (contain the very identifiers we redacted)
+.scrub-patterns.txt
+.scrub-mailmap.txt
+.git.pre-scrub-snapshot/
