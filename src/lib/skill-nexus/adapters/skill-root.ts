@@ -74,7 +74,10 @@ export const skillRootAdapter: SkillNexusAdapter = {
     const warnings: string[] = [];
     let problemCount = 0;
 
-    for (const file of files.slice(0, 400)) {
+    // Cap: skill roots with many docs (Hermes-style mirrors of dozens of agents) regularly
+    // exceed 400. Bumped to 800 to fit those without truncation, while still bounding scan cost.
+    const FILE_CAP = 800;
+    for (const file of files.slice(0, FILE_CAP)) {
       const read = await safeReadText(file.absPath, cfg.skillNexus.maxFileBytes);
       const relPath = toRelativePath(file.absPath, rootPath);
 
@@ -158,8 +161,8 @@ export const skillRootAdapter: SkillNexusAdapter = {
       });
     }
 
-    if (files.length > 400) {
-      warnings.push(`Walk truncated at 400 files — root holds ${files.length} candidate files.`);
+    if (files.length > FILE_CAP) {
+      warnings.push(`Walk truncated at ${FILE_CAP} files — root holds ${files.length} candidate files.`);
     }
 
     const skillCount = items.filter((item) => item.tags?.includes("skill")).length;

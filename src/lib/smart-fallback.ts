@@ -2,6 +2,7 @@ import "server-only";
 
 import { spawn } from "node:child_process";
 import { promises as fs } from "node:fs";
+import { basename, dirname, join } from "node:path";
 
 import { loadCouncilConfig } from "@/lib/council-config";
 
@@ -178,6 +179,18 @@ export async function resolveRoutableModel(preferredModelId: string, agent?: str
 // credentials — only state tags, scores, cooldowns, and chosen model IDs. Designed to be
 // rendered in a dashboard card without exposing paths or tokens.
 
+export type ModelProviderInfo = {
+  name: string;
+  priority?: number;
+  has_api_key_env?: boolean;
+};
+
+export type CapabilityEvidence = {
+  capability: string;
+  passes: number;
+  fails: number;
+};
+
 export type ModelEntry = {
   model_id: string;
   circuit_state: "closed" | "open" | "half_open" | "unknown";
@@ -187,6 +200,7 @@ export type ModelEntry = {
   consecutive_failures: number;
   total_calls: number;
   total_successes: number;
+  total_errors: number;
   total_rate_limits: number;
   total_quota_exhaustions: number;
   total_timeouts: number;
@@ -195,34 +209,89 @@ export type ModelEntry = {
   last_success_at: number;
   last_failure_at: number;
   last_error: string;
+  // From model-health.circuit (deeper extraction)
+  circuit_failure_count: number;
+  circuit_success_count: number;
+  circuit_opened_at: number;
+  circuit_last_probe_at: number;
+  // Derived from rate_limit_history
+  rate_limit_recent_count: number; // last hour
+  rate_limit_last_at: number;
+  // From model-registry.json
+  display_name?: string;
+  context_window?: number;
+  capabilities?: string[];
+  providers?: ModelProviderInfo[];
+  registry_known: boolean;
+  // From model-intel.json
+  capability_evidence?: CapabilityEvidence[];
+  intel_last_probed_at?: number;
+  // From probe-last-run.json
+  last_probe_run_at?: number;
 };
 
 export type EngineSnapshot = {
   engineAvailable: boolean;
+  registryAvailable: boolean;
+  intelAvailable: boolean;
   totalModels: number;
+  registryModelCount: number;
   healthy: number;
   recovering: number;
   blocked: number;
+  rateLimitedRecently: number;
   models: ModelEntry[];
   generatedAt: number;
   source: string;
+  healthLastUpdated: number;
+  registryBuiltAt?: string;
+  capabilityCoverage: Record<string, number>;
 };
+
+// Derive sibling data files from the configured health file path. Registry, intel, and
+// probe-last-run all live next to model-health.json in the engine's data dir.
+function siblingPath(healthFile: string, fileName: string): string {
+  // Works for both Windows UNC paths and POSIX paths because basename/dirname use the
+  // active platform separators on Windows but tolerate forward slashes.
+  return join(dirname(healthFile), fileName);
+}
+
+async function tryReadJson(path: string): Promise<any | null> {
+  try {
+    const raw = await fs.readFile(path, "utf8");
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
 
 export async function getEngineSnapshot(): Promise<EngineSnapshot> {
   const fallback: EngineSnapshot = {
     engineAvailable: false,
+    registryAvailable: false,
+    intelAvailable: false,
     totalModels: 0,
+    registryModelCount: 0,
     healthy: 0,
     recovering: 0,
     blocked: 0,
+    rateLimitedRecently: 0,
     models: [],
     generatedAt: Date.now(),
     source: "unavailable",
+    healthLastUpdated: 0,
+    capabilityCoverage: {},
   };
+
+  const cfg = loadCouncilConfig();
+  const healthFile = cfg.smartFallback.healthFile;
+  const registryFile = siblingPath(healthFile, "model-registry.json");
+  const intelFile = siblingPath(healthFile, "model-intel.json");
+  const probeFile = siblingPath(healthFile, "probe-last-run.json");
 
   let raw: string;
   try {
-    raw = await fs.readFile(loadCouncilConfig().smartFallback.healthFile, "utf8");
+    raw = await fs.readFile(healthFile, "utf8");
   } catch {
     return fallback;
   }
@@ -234,9 +303,85 @@ export async function getEngineSnapshot(): Promise<EngineSnapshot> {
     return fallback;
   }
 
+  // Read sibling files in parallel — all are optional.
+  const [registryDoc, intelDoc, probeDoc] = await Promise.all([
+    tryReadJson(registryFile),
+    tryReadJson(intelFile),
+    tryReadJson(probeFile),
+  ]);
+
+  // Build a registry index keyed by model id. Strip base_url from providers — keeping only
+  // the provider name + priority + a flag for whether an api_key_env is configured. This
+  // avoids leaking infra URLs to the HUD client while still surfacing routing context.
+  const registryIndex = new Map<string, {
+    display: string;
+    context_window: number;
+    capabilities: string[];
+    providers: ModelProviderInfo[];
+  }>();
+  let registryBuiltAt: string | undefined;
+  if (registryDoc && Array.isArray(registryDoc.models)) {
+    registryBuiltAt = typeof registryDoc.built_at === "string" ? registryDoc.built_at : undefined;
+    for (const model of registryDoc.models) {
+      if (!model || typeof model !== "object" || typeof model.id !== "string") continue;
+      const providers: ModelProviderInfo[] = Array.isArray(model.providers)
+        ? model.providers
+            .filter((p: any) => p && typeof p === "object" && typeof p.name === "string")
+            .map((p: any) => ({
+              name: String(p.name),
+              priority: typeof p.priority === "number" ? p.priority : undefined,
+              has_api_key_env: typeof p.api_key_env === "string" && p.api_key_env.length > 0,
+            }))
+        : [];
+      registryIndex.set(model.id, {
+        display: typeof model.display === "string" ? model.display : model.id,
+        context_window: Number(model.context_window || 0),
+        capabilities: Array.isArray(model.capabilities) ? model.capabilities.filter((c: any) => typeof c === "string") : [],
+        providers,
+      });
+    }
+  }
+
+  // Intel index: capability evidence + last_probed_at per model.
+  const intelIndex = new Map<string, { evidence: CapabilityEvidence[]; last_probed_at: number }>();
+  const intelModels = intelDoc?.models && typeof intelDoc.models === "object" ? intelDoc.models : intelDoc;
+  if (intelModels && typeof intelModels === "object") {
+    for (const [modelId, info] of Object.entries<any>(intelModels)) {
+      if (!info || typeof info !== "object") continue;
+      const evidence: CapabilityEvidence[] = [];
+      const capEvidence = info.capability_evidence && typeof info.capability_evidence === "object" ? info.capability_evidence : {};
+      for (const [cap, ev] of Object.entries<any>(capEvidence)) {
+        if (!ev || typeof ev !== "object") continue;
+        evidence.push({
+          capability: cap,
+          passes: Number(ev.passes ?? 0),
+          fails: Number(ev.fails ?? 0),
+        });
+      }
+      intelIndex.set(modelId, {
+        evidence,
+        last_probed_at: Number(info.last_probed_at ?? 0),
+      });
+    }
+  }
+
+  // Probe-last-run index: per-model last probe timestamp from the latest probe sweep.
+  const probeIndex = new Map<string, number>();
+  if (probeDoc && typeof probeDoc === "object" && !Array.isArray(probeDoc)) {
+    for (const [modelId, info] of Object.entries<any>(probeDoc)) {
+      if (!info || typeof info !== "object") continue;
+      const ts = Number(info.last_probed_at ?? 0);
+      if (ts > 0) probeIndex.set(modelId, ts);
+    }
+  }
+
   const health = parsed?.health && typeof parsed.health === "object" ? parsed.health : {};
+  const healthLastUpdated = Number(parsed?.lastUpdated ?? 0);
   const now = Date.now() / 1000;
+  const oneHourAgo = now - 3600;
   const entries: ModelEntry[] = [];
+  let rateLimitedRecently = 0;
+  const capabilityCoverage: Record<string, number> = {};
 
   for (const [modelId, info] of Object.entries<any>(health)) {
     if (!info || typeof info !== "object") continue;
@@ -247,6 +392,22 @@ export async function getEngineSnapshot(): Promise<EngineSnapshot> {
     const state = stateRaw === "closed" || stateRaw === "open" || stateRaw === "half_open"
       ? stateRaw as ModelEntry["circuit_state"]
       : "unknown";
+
+    const rateLimitHistory = Array.isArray(info.rate_limit_history) ? info.rate_limit_history : [];
+    const recentRateLimits = rateLimitHistory.filter((ts: any) => Number(ts) >= oneHourAgo).length;
+    const lastRateLimit = rateLimitHistory.length > 0 ? Number(rateLimitHistory[rateLimitHistory.length - 1]) : 0;
+    if (recentRateLimits > 0) rateLimitedRecently += 1;
+
+    const registryInfo = registryIndex.get(modelId);
+    const intelInfo = intelIndex.get(modelId);
+    const probeRun = probeIndex.get(modelId);
+
+    if (registryInfo) {
+      for (const cap of registryInfo.capabilities) {
+        capabilityCoverage[cap] = (capabilityCoverage[cap] || 0) + 1;
+      }
+    }
+
     entries.push({
       model_id: modelId,
       circuit_state: state,
@@ -256,6 +417,7 @@ export async function getEngineSnapshot(): Promise<EngineSnapshot> {
       consecutive_failures: Number(info.consecutive_failures ?? 0),
       total_calls: Number(info.total_calls ?? 0),
       total_successes: Number(info.total_successes ?? 0),
+      total_errors: Number(info.total_errors ?? 0),
       total_rate_limits: Number(info.total_rate_limits ?? 0),
       total_quota_exhaustions: Number(info.total_quota_exhaustions ?? 0),
       total_timeouts: Number(info.total_timeouts ?? 0),
@@ -264,6 +426,28 @@ export async function getEngineSnapshot(): Promise<EngineSnapshot> {
       last_success_at: Number(info.last_success_at ?? 0),
       last_failure_at: Number(info.last_failure_at ?? 0),
       last_error: typeof info.last_error === "string" ? info.last_error.slice(0, 160) : "",
+      circuit_failure_count: Number(circuit.failure_count ?? 0),
+      circuit_success_count: Number(circuit.success_count ?? 0),
+      circuit_opened_at: Number(circuit.opened_at ?? 0),
+      circuit_last_probe_at: Number(circuit.last_probe_at ?? 0),
+      rate_limit_recent_count: recentRateLimits,
+      rate_limit_last_at: lastRateLimit,
+      ...(registryInfo
+        ? {
+            display_name: registryInfo.display,
+            context_window: registryInfo.context_window,
+            capabilities: registryInfo.capabilities,
+            providers: registryInfo.providers,
+            registry_known: true,
+          }
+        : { registry_known: false }),
+      ...(intelInfo
+        ? {
+            capability_evidence: intelInfo.evidence,
+            intel_last_probed_at: intelInfo.last_probed_at,
+          }
+        : {}),
+      ...(probeRun ? { last_probe_run_at: probeRun } : {}),
     });
   }
 
@@ -298,13 +482,21 @@ export async function getEngineSnapshot(): Promise<EngineSnapshot> {
 
   return {
     engineAvailable: true,
+    registryAvailable: registryIndex.size > 0,
+    intelAvailable: intelIndex.size > 0,
     totalModels: entries.length,
+    registryModelCount: registryIndex.size,
     healthy,
     recovering,
     blocked,
+    rateLimitedRecently,
     models: entries,
     generatedAt: Date.now(),
-    source: loadCouncilConfig().smartFallback.healthFile,
+    // Only the basename of the source — full paths leak the WSL user/home dir.
+    source: basename(healthFile),
+    healthLastUpdated,
+    registryBuiltAt,
+    capabilityCoverage,
   };
 }
 
@@ -315,6 +507,19 @@ export type AgentPick = {
   capabilities?: string[];
   best_provider?: string;
   circuit_state?: string;
+  // From engine.py `chain` — the top 3 candidates with their composite score breakdown
+  // so the UI can show why a particular model was chosen over another.
+  alternates?: Array<{
+    model_id: string;
+    total_score?: number;
+    capability_score?: number;
+    stability_score?: number;
+    cost_score?: number;
+    context_score?: number;
+    speed_score?: number;
+    provider_affinity_score?: number;
+    circuit_state?: string;
+  }>;
   error?: string;
 };
 
@@ -323,15 +528,75 @@ export async function getAgentPicks(agents?: string[]): Promise<AgentPick[]> {
   return getAgentPicksInternal(resolvedAgents);
 }
 
+// Engine's `chain` command yields the ranked candidates with weighted score components.
+// Output shape (with --format dicts): { agent, pass, models: [{ eligible, model_id, context_window,
+// capabilities, best_provider: {name, model_ref, api_key_env, base_url, priority}, cost_tier,
+// circuit_state, scores: {capability, stability, cost, context, speed, provider_affinity},
+// weighted, pass }] }. We strip base_url and api_key_env before bubbling up to the HUD client.
+async function getChainOrPick(agent: string): Promise<{ pick: FallbackPick | null; chain: any[] }> {
+  const chainRaw = await runEngine(["chain", "--agent", agent, "--limit", "3", "--format", "dicts"]);
+  if (chainRaw) {
+    const parsed = parseJson<any>(chainRaw);
+    const candidates: any[] = Array.isArray(parsed?.models)
+      ? parsed.models
+      : Array.isArray(parsed)
+        ? parsed
+        : Array.isArray(parsed?.candidates)
+          ? parsed.candidates
+          : Array.isArray(parsed?.chain)
+            ? parsed.chain
+            : [];
+    if (candidates.length > 0) {
+      const top = candidates[0];
+      // Strip provider internals — engine includes base_url + api_key_env we don't want client-side.
+      const providerObj = top.best_provider && typeof top.best_provider === "object"
+        ? { name: String(top.best_provider.name || "") }
+        : typeof top.best_provider === "string"
+          ? { name: top.best_provider }
+          : undefined;
+      const pick: FallbackPick = {
+        eligible: Boolean(top.eligible ?? top.model_id),
+        model_id: String(top.model_id || ""),
+        capabilities: Array.isArray(top.capabilities) ? top.capabilities : undefined,
+        best_provider: providerObj,
+        circuit_state: typeof top.circuit_state === "string" ? top.circuit_state : undefined,
+      };
+      // Stash context_window on the pick for the AgentPick layer to forward.
+      if (typeof top.context_window === "number") {
+        (pick as any).context_window = top.context_window;
+      }
+      return { pick: pick.model_id ? pick : null, chain: candidates };
+    }
+  }
+  const pick = await pickFallbackModel(agent);
+  return { pick, chain: [] };
+}
+
 async function getAgentPicksInternal(agents: string[]): Promise<AgentPick[]> {
   const results: AgentPick[] = [];
   for (const agent of agents) {
-    const pick = await pickFallbackModel(agent);
+    const { pick, chain } = await getChainOrPick(agent);
     if (!pick) {
       results.push({ agent, model_id: null, error: "engine unavailable or no eligible model" });
       continue;
     }
     const provider = pick.best_provider as any;
+    const alternates = chain.slice(0, 3).map((entry: any) => {
+      const scores = entry.scores && typeof entry.scores === "object" ? entry.scores : {};
+      return {
+        model_id: String(entry.model_id || ""),
+        total_score: typeof entry.weighted === "number"
+          ? entry.weighted
+          : (typeof entry.total_score === "number" ? entry.total_score : undefined),
+        capability_score: typeof scores.capability === "number" ? scores.capability : undefined,
+        stability_score: typeof scores.stability === "number" ? scores.stability : undefined,
+        cost_score: typeof scores.cost === "number" ? scores.cost : undefined,
+        context_score: typeof scores.context === "number" ? scores.context : undefined,
+        speed_score: typeof scores.speed === "number" ? scores.speed : undefined,
+        provider_affinity_score: typeof scores.provider_affinity === "number" ? scores.provider_affinity : undefined,
+        circuit_state: typeof entry.circuit_state === "string" ? entry.circuit_state : undefined,
+      };
+    }).filter((a: any) => a.model_id);
     results.push({
       agent,
       model_id: pick.model_id,
@@ -339,6 +604,7 @@ async function getAgentPicksInternal(agents: string[]): Promise<AgentPick[]> {
       capabilities: pick.capabilities,
       best_provider: provider?.name,
       circuit_state: pick.circuit_state,
+      ...(alternates.length > 1 ? { alternates } : {}),
     });
   }
   return results;
@@ -354,4 +620,98 @@ export async function resetModelCircuit(modelId: string): Promise<{ ok: boolean;
   for (const key of pickCache.keys()) pickCache.delete(key);
   if (raw === null) return { ok: false, error: "engine unavailable" };
   return { ok: true };
+}
+
+// === Reprobe blocked models ============================================
+// Reset + reprobe every model whose last error indicates an environmental
+// blocker (missing API key, timeout). The probe runner inside WSL reloads
+// ~/.hermes/.env automatically (since the probe-script env-loader patch),
+// so this picks up new credentials without restarting anything.
+//
+// The probe script lives at ~/.openclaw/workspace/scripts/probe_unused_models.py
+// and accepts `--model <id>` to force a single-model probe bypassing the
+// 24h recency cooldown. We loop one-by-one to bound per-call wall time.
+
+const PROBE_SCRIPT_REL = "/.openclaw/workspace/scripts/probe_unused_models.py";
+
+function runProbeForModel(modelId: string, timeoutMs = 40_000): Promise<{ ok: boolean; output: string }> {
+  const cfg = loadCouncilConfig();
+  return new Promise((resolve) => {
+    let resolved = false;
+    const finish = (value: { ok: boolean; output: string }) => {
+      if (resolved) return;
+      resolved = true;
+      resolve(value);
+    };
+
+    // probe_unused_models.py lives relative to the WSL user's home, not the engine dir.
+    const probePath = `/home/${cfg.wsl.user}${PROBE_SCRIPT_REL}`;
+    const child = spawn(
+      "wsl.exe",
+      ["-d", cfg.wsl.distro, "-u", cfg.wsl.user, "--", "python3", probePath, "--model", modelId],
+      { windowsHide: true }
+    );
+
+    let stdout = "";
+    let stderr = "";
+    const timer = setTimeout(() => {
+      child.kill();
+      finish({ ok: false, output: `timeout after ${timeoutMs}ms` });
+    }, timeoutMs);
+
+    child.stdout.on("data", (chunk) => { stdout += chunk.toString(); });
+    child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      finish({ ok: false, output: `spawn error: ${error.message}` });
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      const tail = (stdout || stderr).trim().split("\n").slice(-3).join(" | ").slice(0, 240);
+      finish({ ok: code === 0, output: tail });
+    });
+  });
+}
+
+export type ReprobeResult = {
+  attempted: number;
+  passed: number;
+  failed: number;
+  failures: Array<{ model_id: string; error: string }>;
+};
+
+export async function reprobeBlockedModels(opts?: { kinds?: string[]; max?: number }): Promise<ReprobeResult> {
+  const kinds = opts?.kinds && opts.kinds.length > 0 ? opts.kinds : ["missing-env-", "timeout"];
+  const maxModels = opts?.max ?? 40;
+
+  const snapshot = await getEngineSnapshot();
+  const targets = snapshot.models
+    .filter((entry) => {
+      const err = entry.last_error || "";
+      return kinds.some((k) => k.endsWith("-") ? err.startsWith(k) : err === k);
+    })
+    .slice(0, maxModels)
+    .map((entry) => entry.model_id);
+
+  let passed = 0;
+  let failed = 0;
+  const failures: Array<{ model_id: string; error: string }> = [];
+
+  for (const modelId of targets) {
+    // Always reset first — the probe runner skips open-circuit models.
+    await resetModelCircuit(modelId);
+    const result = await runProbeForModel(modelId);
+    if (result.ok) {
+      passed += 1;
+    } else {
+      failed += 1;
+      failures.push({ model_id: modelId, error: result.output });
+    }
+  }
+
+  // Wipe routability caches so the HUD sees the fresh health immediately.
+  checkCache.clear();
+  pickCache.clear();
+
+  return { attempted: targets.length, passed, failed, failures };
 }
