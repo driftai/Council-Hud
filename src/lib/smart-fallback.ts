@@ -249,6 +249,44 @@ export type EngineSnapshot = {
   capabilityCoverage: Record<string, number>;
 };
 
+// Some health records use a `<provider>/<model_ref>` key from older engine versions
+// (e.g. `nvidia-all-stars/z-ai/glm5`, `openrouter/qwen/qwen3-coder:free`). These don't
+// match the canonical registry IDs so they show up as orphans. We can still recover
+// the routing info by parsing the prefix — and inferring which API key the provider
+// would have used from the provider-name → env-var mapping the engine itself defines.
+const KNOWN_PROVIDER_PREFIXES = new Set([
+  "nvidia",
+  "nvidia-all-stars",
+  "nvidia-reliables",
+  "nvidia-speedsters",
+  "openrouter",
+  "openrouter-lockbox",
+  "google",
+  "google-antigravity",
+  "github",
+  "github-Experimental",
+  "openclaw-set",
+  "backup-processes",
+  "free-project",
+  "decommissioned-endpoints",
+]);
+
+function inferProviderFromKey(modelId: string): { provider: string; model_ref: string; api_key_env?: string } | null {
+  const slash = modelId.indexOf("/");
+  if (slash <= 0) return null;
+  const provider = modelId.slice(0, slash);
+  // Only treat as a provider prefix if it's in the known set — model_refs like "qwen/qwen3"
+  // legitimately contain slashes but the first segment isn't a provider name.
+  if (!KNOWN_PROVIDER_PREFIXES.has(provider)) return null;
+  const model_ref = modelId.slice(slash + 1);
+  let api_key_env: string | undefined;
+  if (provider.includes("nvidia")) api_key_env = "NVIDIA_API_KEY";
+  else if (provider.includes("openrouter")) api_key_env = "OPENROUTER_API_KEY";
+  else if (provider.includes("google") || provider === "antigravity") api_key_env = "GOOGLE_API_KEY";
+  else if (provider.includes("github")) api_key_env = "GITHUB_TOKEN";
+  return { provider, model_ref, api_key_env };
+}
+
 // Derive sibling data files from the configured health file path. Registry, intel, and
 // probe-last-run all live next to model-health.json in the engine's data dir.
 function siblingPath(healthFile: string, fileName: string): string {
@@ -442,7 +480,23 @@ export async function getEngineSnapshot(): Promise<EngineSnapshot> {
             providers: registryInfo.providers,
             registry_known: true,
           }
-        : { registry_known: false }),
+        : (() => {
+            // Orphan record: try to recover the provider from a `<provider>/<model_ref>`
+            // key shape used by older engine versions. We still report registry_known=false
+            // so the HUD can show an "orphan" badge, but provider info is no longer "?".
+            const inferred = inferProviderFromKey(modelId);
+            if (inferred) {
+              return {
+                registry_known: false,
+                display_name: inferred.model_ref,
+                providers: [{
+                  name: inferred.provider,
+                  has_api_key_env: typeof inferred.api_key_env === "string",
+                }],
+              };
+            }
+            return { registry_known: false };
+          })()),
       ...(intelInfo
         ? {
             capability_evidence: intelInfo.evidence,
