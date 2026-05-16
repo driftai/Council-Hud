@@ -625,8 +625,8 @@ export function CouncilComms() {
           </div>
         )}
 
-        {/* Quick-pick chips for topics any agent is currently subscribed to. Lets Drift
-            jump between filter scopes without typing topic names. Hub-side topic
+        {/* Quick-pick chips for topics any agent is currently subscribed to. Lets the
+            operator jump between filter scopes without typing topic names. Hub-side topic
             subscriptions are the actual filter mechanism — these chips just surface
             them client-side so they're usable from the HUD. */}
         {scope === "topic" && (() => {

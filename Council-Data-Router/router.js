@@ -497,8 +497,8 @@ app.get('/graph', requireAuth, async (req, res) => {
             return resolveWindowTitle(proc.parentPid, depth + 1);
         }
         // Combined node set: top 10 by CPU + every process that natively owns a window
-        // (the foreground-app set). Deduplicated, capped at 16. This way Drift sees the
-        // CPU hogs AND the apps he's actively interacting with.
+        // (the foreground-app set). Deduplicated, capped at 16 so the operator sees both
+        // the CPU hogs AND the apps that own visible windows.
         const topCpu = [...list].sort((a, b) => b.cpu - a.cpu).slice(0, 10);
         const windowed = list.filter(p => titles.has(p.pid));
         const merged = new Map();

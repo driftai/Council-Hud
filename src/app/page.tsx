@@ -6,7 +6,6 @@ import { CouncilComms } from "@/components/dashboard/CouncilComms";
 import { SmartFallback } from "@/components/dashboard/SmartFallback";
 import { SkillNexus } from "@/components/dashboard/SkillNexus";
 import { AutoResearch } from "@/components/dashboard/AutoResearch";
-import { AuditTrail } from "@/components/dashboard/AuditTrail";
 import { HarnessSource } from "@/components/dashboard/HarnessSource";
 import { NeuralVisualizer } from "@/components/dashboard/NeuralVisualizer";
 import { KnowledgeGraph } from "@/components/dashboard/KnowledgeGraph";
@@ -891,26 +890,30 @@ export default function Home() {
             </div>
           </div>
 
-          {/* Right column — auto-fit grid with a 340px floor per cell. Cards never
-              squeeze below 340px (their titles + counts stay readable); when there
-              isn't room for two side-by-side they drop to one column instead. The
-              wide cards (HarnessSource / CouncilComms / SkillNexus) always span the
-              full row. `grid-auto-flow:row dense` packs gaps so the layout stays tidy
-              regardless of card height. */}
-          <div className="lg:col-span-3 xl:col-span-4 2xl:col-span-4 grid grid-cols-1 [grid-template-columns:repeat(auto-fit,minmax(340px,1fr))] gap-6 items-start [grid-auto-flow:row_dense]">
+          {/* Right column — the always-on operator cards stay pinned to the side
+              because their identity is "current state alongside the central viz".
+              Only AgentRoster + SmartFallback live here so the column doesn't get
+              too tall. The deeper telemetry cards live in a full-width grid below
+              this row where they have actual screen real estate to distribute. */}
+          <div className="lg:col-span-3 xl:col-span-4 2xl:col-span-4 space-y-6">
             <AgentRoster />
             <SmartFallback />
-            <AutoResearch />
-            <AuditTrail />
-            <div className="col-span-full">
-              <HarnessSource />
-            </div>
-            <div className="col-span-full">
-              <CouncilComms />
-            </div>
-            <div className="col-span-full">
-              <SkillNexus />
-            </div>
+          </div>
+        </div>
+
+        {/* Full-width telemetry row — auto-fit grid with a 340px-per-card floor.
+            Lives below the main 3-col grid so it gets the entire screen width to
+            distribute. Cards never squeeze below 340px (titles stay readable); when
+            there isn't room they drop to fewer columns. Wide tabbed cards
+            (CouncilComms / SkillNexus) take the full row when they appear. */}
+        <div className="mt-6 grid grid-cols-1 [grid-template-columns:repeat(auto-fit,minmax(340px,1fr))] gap-6 items-start [grid-auto-flow:row_dense]">
+          <AutoResearch />
+          <HarnessSource />
+          <div className="col-span-full">
+            <CouncilComms />
+          </div>
+          <div className="col-span-full">
+            <SkillNexus />
           </div>
         </div>
       </div>
