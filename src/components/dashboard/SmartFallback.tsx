@@ -66,6 +66,13 @@ type ModelEntry = {
   last_probe_run_at?: number;
 };
 
+type ProbeJudgeStat = {
+  capability: string;
+  passes: number;
+  fails: number;
+  models_with_evidence: number;
+};
+
 type EngineSnapshot = {
   engineAvailable: boolean;
   registryAvailable: boolean;
@@ -83,6 +90,7 @@ type EngineSnapshot = {
   healthLastUpdated: number;
   registryBuiltAt?: string;
   capabilityCoverage: Record<string, number>;
+  probeJudges: ProbeJudgeStat[];
 };
 
 type ScoreBreakdown = {
@@ -373,6 +381,66 @@ export function SmartFallback() {
             ))}
           </div>
         </div>
+
+        {snapshot && (snapshot.probeJudges?.length > 0 || picks.some((p) => p.alternates && p.alternates.length > 0)) && (
+          <div className="rounded border border-white/10 bg-black/20 p-2">
+            <div className="mb-1.5 flex items-center gap-1 font-mono text-[9px] uppercase text-muted-foreground">
+              <ShieldCheck className="h-3 w-3 text-secondary" />
+              <span>Judges</span>
+              <span
+                className="ml-auto cursor-help text-[8px] text-muted-foreground/60"
+                title="Smart Fallback uses two judge layers: routing judges (6 weighted criteria that pick which model an agent gets) and probe judges (math/json/instruct content tests that produce capability evidence). Evidence feeds back into the capability score on every re-probe."
+              >
+                what is this?
+              </span>
+            </div>
+
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <p className="mb-1 font-mono text-[8px] uppercase text-muted-foreground/70">Routing judges (per pick)</p>
+                <div className="space-y-0.5 font-mono text-[9px]">
+                  {[
+                    { key: "capability", label: "Capability fit", tip: "How well the model's tags match the agent's preferred capabilities + capability_evidence from probes." },
+                    { key: "stability",  label: "Stability",      tip: "Rolling success rate + cooldown state. Drops when the circuit trips, recovers as probes pass." },
+                    { key: "cost",       label: "Cost tier",      tip: "Free providers score 100, paid providers score lower so passes 1-2 stay free." },
+                    { key: "context",    label: "Context window", tip: "Fraction of the agent's context_min_soft the model can hold." },
+                    { key: "speed",      label: "Speed",          tip: "Latency-based score from EWMA of recent calls." },
+                    { key: "provider_affinity", label: "Provider affinity", tip: "Bonus for providers the agent prefers in its profile." },
+                  ].map((j) => (
+                    <div key={j.key} className="flex items-center justify-between gap-2" title={j.tip}>
+                      <span className="truncate text-muted-foreground/80">{j.label}</span>
+                      <span className="shrink-0 text-[8px] uppercase text-muted-foreground/60">routing</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+              <div>
+                <p className="mb-1 font-mono text-[8px] uppercase text-muted-foreground/70">Probe judges (rolling pass-rate)</p>
+                <div className="space-y-0.5 font-mono text-[9px]">
+                  {snapshot.probeJudges.length === 0 ? (
+                    <p className="text-muted-foreground/60">No probe evidence yet — run the probe sweep.</p>
+                  ) : snapshot.probeJudges.slice(0, 6).map((judge) => {
+                    const total = judge.passes + judge.fails;
+                    const rate = total > 0 ? judge.passes / total : 0;
+                    const tone = rate >= 0.7 ? "text-secondary" : rate >= 0.4 ? "text-yellow-400/80" : "text-destructive/80";
+                    return (
+                      <div
+                        key={judge.capability}
+                        className="flex items-center justify-between gap-2"
+                        title={`${judge.passes} pass · ${judge.fails} fail across ${judge.models_with_evidence} models`}
+                      >
+                        <span className="truncate text-muted-foreground/80">{judge.capability}</span>
+                        <span className={cn("shrink-0 font-mono text-[8px] uppercase", tone)}>
+                          {judge.passes}/{total} ({Math.round(rate * 100)}%)
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
 
         <div className="flex items-center justify-between gap-2">
           <div className="flex items-center gap-1 rounded border border-white/10 bg-black/20 p-1">

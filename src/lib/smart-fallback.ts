@@ -230,6 +230,16 @@ export type ModelEntry = {
   last_probe_run_at?: number;
 };
 
+// Aggregate verdict from the probe runner's content judges (math / json / instruct / etc.).
+// Each capability becomes one judge — `passes` and `fails` are summed across every model
+// in the catalog. Gives the HUD a single "how is judge X doing overall" number to display.
+export type ProbeJudgeStat = {
+  capability: string;
+  passes: number;
+  fails: number;
+  models_with_evidence: number;
+};
+
 export type EngineSnapshot = {
   engineAvailable: boolean;
   registryAvailable: boolean;
@@ -247,6 +257,7 @@ export type EngineSnapshot = {
   healthLastUpdated: number;
   registryBuiltAt?: string;
   capabilityCoverage: Record<string, number>;
+  probeJudges: ProbeJudgeStat[];
 };
 
 // Some health records use a `<provider>/<model_ref>` key from older engine versions
@@ -321,6 +332,7 @@ export async function getEngineSnapshot(): Promise<EngineSnapshot> {
     source: "unavailable",
     healthLastUpdated: 0,
     capabilityCoverage: {},
+    probeJudges: [],
   };
 
   const cfg = loadCouncilConfig();
@@ -422,6 +434,7 @@ export async function getEngineSnapshot(): Promise<EngineSnapshot> {
   const entries: ModelEntry[] = [];
   let rateLimitedRecently = 0;
   const capabilityCoverage: Record<string, number> = {};
+  const probeJudgeAgg = new Map<string, ProbeJudgeStat>();
 
   for (const [modelId, info] of Object.entries<any>(health)) {
     if (!info || typeof info !== "object") continue;
@@ -445,6 +458,21 @@ export async function getEngineSnapshot(): Promise<EngineSnapshot> {
     if (registryInfo) {
       for (const cap of registryInfo.capabilities) {
         capabilityCoverage[cap] = (capabilityCoverage[cap] || 0) + 1;
+      }
+    }
+    // Aggregate probe-judge outcomes across the catalog so the HUD can show "math judge:
+    // 28 passes / 53 fails across 41 models". Each capability in the intel file's
+    // capability_evidence is one judge.
+    if (intelInfo) {
+      for (const ev of intelInfo.evidence) {
+        let stat = probeJudgeAgg.get(ev.capability);
+        if (!stat) {
+          stat = { capability: ev.capability, passes: 0, fails: 0, models_with_evidence: 0 };
+          probeJudgeAgg.set(ev.capability, stat);
+        }
+        stat.passes += ev.passes;
+        stat.fails += ev.fails;
+        if (ev.passes > 0 || ev.fails > 0) stat.models_with_evidence += 1;
       }
     }
 
@@ -561,6 +589,7 @@ export async function getEngineSnapshot(): Promise<EngineSnapshot> {
     healthLastUpdated,
     registryBuiltAt,
     capabilityCoverage,
+    probeJudges: Array.from(probeJudgeAgg.values()).sort((a, b) => (b.passes + b.fails) - (a.passes + a.fails)),
   };
 }
 
