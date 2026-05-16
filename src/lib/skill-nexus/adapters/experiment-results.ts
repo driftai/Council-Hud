@@ -119,34 +119,28 @@ export const experimentResultsAdapter: SkillNexusAdapter = {
       const status: SkillNexusItem["status"] = kept ? "ok" : "rejected";
       if (status !== "ok" && status !== "rejected") problemCount += 1;
 
-      // Surface judge sub-scores in meta keyed by judge name, plus the llm_judge breakdown
-      // (task / error / token / decision / context) parsed from details when present.
+      // Slim meta: composite + outcome + a single condensed `judges` line ("tool_latency:6.3
+      // memory:7.1 llm:5.0 dna:8.2") instead of one pill per judge. The HUD becomes unreadable
+      // with 14 pills per row across 60 experiments — and the per-judge aggregate already
+      // surfaces in domain-level meta (judge_<name>_mean below).
+      const judgeSummary = Object.entries(judges)
+        .map(([name, info]) => `${name.replace(/_/g, "")}:${(Math.round(info.score * 10) / 10).toFixed(1)}`)
+        .join(" ");
+      const llmJudgeDetails = judges.llm_judge?.details;
       const meta: Record<string, string | number | boolean> = {
         composite: Math.round(composite * 1000) / 1000,
         kept,
         improvement: Math.round(improvement * 1000) / 1000,
         mutations: mutations.length,
-        judges: Object.keys(judges).join(","),
+        ...(judgeSummary ? { judges: judgeSummary } : {}),
+        ...(llmJudgeDetails ? { llm: llmJudgeDetails } : {}),
       };
-      for (const [name, info] of Object.entries(judges)) {
-        meta[`judge_${name}`] = Math.round(info.score * 1000) / 1000;
-      }
-      const llmJudgeDetails = judges.llm_judge?.details;
-      if (llmJudgeDetails) {
-        // "task=8, error=5, token=4, decision=6, context=7" → key/val pairs
-        const dims = llmJudgeDetails.split(/,\s*/);
-        for (const pair of dims) {
-          const [k, v] = pair.split("=").map((s) => s.trim());
-          const num = Number(v);
-          if (k && Number.isFinite(num)) meta[`llm_${k}`] = num;
-        }
-      }
 
-      // Top mutation categories (gives a quick "what was tested" signal).
+      // Top mutation categories (gives a quick "what was tested" signal). Capped at 3.
       const mutationCats = mutations
         .map((m: any) => typeof m === "object" ? String(m.category || m.gene || "") : "")
         .filter(Boolean)
-        .slice(0, 4)
+        .slice(0, 3)
         .join(", ");
       if (mutationCats) meta["tested"] = mutationCats;
 

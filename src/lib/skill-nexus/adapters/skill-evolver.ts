@@ -60,8 +60,14 @@ export const skillEvolverAdapter: SkillNexusAdapter = {
         warnings.push("skillsDir is not reachable.");
       }
 
+      // Parent skill folders are often **symlinks** into a master-skills bundle (the openclaw
+      // setup links workspace/skills/<name> → master-skills/skills/<name>). Plain isDirectory()
+      // returns false for symlinks, which would mis-flag every linked parent as MISSING. We
+      // accept both real dirs and symlinks here; the downstream walk handles unresolvable links.
       const allDirs = new Set(
-        entries.filter((entry) => entry.isDirectory() && !entry.name.startsWith(".")).map((entry) => entry.name)
+        entries
+          .filter((entry) => (entry.isDirectory() || entry.isSymbolicLink()) && !entry.name.startsWith("."))
+          .map((entry) => entry.name)
       );
       const evolvedDirs = Array.from(allDirs).filter((name) => name.endsWith(evolvedSuffix));
 
@@ -166,12 +172,17 @@ export const skillEvolverAdapter: SkillNexusAdapter = {
 
         const stale = stat && isStale(stat.mtimeMs, 60);
         let status: SkillNexusItem["status"] = "ok";
+        // Only TRUE structural failures count as `error` (no SKILL.md, unparseable meta).
+        // A judge `reject` verdict on the last evolution attempt is a NORMAL outcome of
+        // the evolver loop — the same way `kept=false` is normal in autoresearch — and
+        // gets the `rejected` non-problem status so it doesn't flood the Issues feed.
         if (!hasSkillMd) { status = "error"; problemCount += 1; }
         else if (!parentExists) { status = "missing"; problemCount += 1; }
-        else if (judgment === "reject" || judgment === "fail" || judgment === "failed") { status = "error"; problemCount += 1; }
+        else if (judgment === "reject" || judgment === "fail" || judgment === "failed") { status = "rejected"; }
         else if (judgment === "revise") { status = "pending"; }
         else if (judgment === "candidate" || judgment === "draft") { status = "candidate"; }
-        else if (imcLevel === "poor" || imcLevel === "partial") { status = "stale"; problemCount += 1; }
+        else if (imcLevel === "poor") { status = "stale"; problemCount += 1; }
+        else if (imcLevel === "partial") { status = "rejected"; }
         else if (stale) { status = "stale"; problemCount += 1; }
         else if (judgment === "promote") { status = "ok"; }
 
@@ -184,6 +195,11 @@ export const skillEvolverAdapter: SkillNexusAdapter = {
           ? Object.entries(judgmentHistogram).map(([j, n]) => `${j} ${n}`).join(" / ")
           : "";
 
+        // Condensed IMC line — "act:80 clar:75 spec:60 ex:3 stp:5" — collapses 6 pills into one.
+        const imcSummary = Object.entries(imcDims)
+          .map(([k, v]) => `${k.slice(0, 4)}:${v}`)
+          .join(" ");
+
         items.push({
           id: shortHash(`evolver|${evolvedName}|${genomeId}`),
           name: clampText(redactAgentNames(title || parentName), 80),
@@ -195,23 +211,20 @@ export const skillEvolverAdapter: SkillNexusAdapter = {
           mtime: evolutionTimestamp || stat?.mtimeMs || 0,
           status,
           tags,
+          // Slim meta: 6-8 pills max instead of 16. Drop redundant signals — `originalScore`
+          // is implied by imcScore + scoreDelta; `promoted` overlaps with `judgment`;
+          // `hasSkillMd` is implied by status; `method` and `genome` are debug-tier; the
+          // per-dim IMC breakdown is collapsed into one summary string.
           meta: {
             parent: parentName,
-            parentPresent: parentExists,
             ...(Number.isFinite(finalScore as number) ? { imcScore: Math.round(finalScore as number) } : {}),
-            ...(Number.isFinite(originalScore as number) ? { originalScore: Math.round(originalScore as number) } : {}),
             ...(imcLevel ? { imc: imcLevel } : {}),
-            ...(judgment ? { judgment } : {}),
-            ...(promoted !== null ? { promoted } : {}),
-            ...(failureReason && failureReason !== "unknown" ? { failureReason: clampText(failureReason, 80) } : {}),
-            ...(Number.isFinite(generationsRun as number) && (generationsRun as number) > 0 ? { generations: generationsRun as number } : {}),
-            ...(attemptsLogged && attemptsLogged > 0 ? { attempts: attemptsLogged } : {}),
-            ...(histSummary ? { historySummary: histSummary } : {}),
-            ...(lastMethod ? { method: lastMethod } : {}),
             ...(Number.isFinite(scoreDelta as number) ? { scoreDelta: Number((scoreDelta as number).toFixed(2)) } : {}),
-            ...imcDims,
-            ...(genomeId ? { genome: genomeId.slice(0, 12) } : {}),
-            hasSkillMd,
+            ...(judgment ? { judgment } : {}),
+            ...(attemptsLogged && attemptsLogged > 0 ? { attempts: attemptsLogged } : {}),
+            ...(histSummary ? { history: histSummary } : {}),
+            ...(imcSummary ? { dims: imcSummary } : {}),
+            ...(status === "error" && failureReason && failureReason !== "unknown" ? { failureReason: clampText(failureReason, 80) } : {}),
           },
         });
       }

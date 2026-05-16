@@ -207,21 +207,23 @@ function inferStatus(entry: any): SkillNexusItem["status"] {
 
 function extractMeta(entry: any): Record<string, string | number | boolean> {
   const meta: Record<string, string | number | boolean> = {};
-  // Generic + evolution-experiment fields. Numbers are rounded to keep payload tidy.
-  for (const key of [
-    "score", "version", "agent", "kind", "type", "severity", "level", "count",
-    "experiment", "improvement", "kept", "magnitude", "verdict", "judge", "model",
-  ]) {
-    const value = entry[key];
-    if (typeof value === "string" && value.length < 80) meta[key] = value;
-    if (typeof value === "number" && Number.isFinite(value)) {
-      // Trim noisy floats (0.8123456789 → 0.812).
+  // Slim allow-list — only the most signal-dense fields become pills. Aliases (level↔severity,
+  // type↔kind, judge↔model↔agent) get coalesced rather than each surfacing as its own pill.
+  const set = (key: string, value: any) => {
+    if (typeof value === "string" && value.length > 0 && value.length < 80) meta[key] = value;
+    else if (typeof value === "number" && Number.isFinite(value)) {
       meta[key] = Number.isInteger(value) ? value : Math.round(value * 1000) / 1000;
-    }
-    if (typeof value === "boolean") meta[key] = value;
-  }
-  // Mutation count signal from evolution records.
-  if (Array.isArray(entry.mutations)) meta["mutations"] = entry.mutations.length;
+    } else if (typeof value === "boolean") meta[key] = value;
+  };
+  set("score", entry.score);
+  set("version", entry.version);
+  set("severity", entry.severity ?? entry.level);
+  set("kind", entry.kind ?? entry.type);
+  set("agent", entry.agent ?? entry.judge ?? entry.model);
+  set("improvement", entry.improvement);
+  set("kept", entry.kept);
+  set("verdict", entry.verdict);
+  if (Array.isArray(entry.mutations) && entry.mutations.length > 0) meta["mutations"] = entry.mutations.length;
   return meta;
 }
 

@@ -61,3 +61,7 @@ Council-Data-Router/council.local.bat
 .scrub-patterns.txt
 .scrub-mailmap.txt
 .git.pre-scrub-snapshot/
+
+# Local dev-server log captured by `npm run dev &` redirects
+.dev-server.log
+
