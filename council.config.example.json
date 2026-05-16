@@ -18,6 +18,7 @@
     "defaultDmTarget": "live-agent-1-bridge",
     "agents": {
       "operator":      { "role": "Operator",      "mode": "operator" },
+      "//sessionUrl": "OpenClaw agents get a /?agent=<name> view on the gateway port (18789 by default). Hermes agents (like meru) use the bundled local web dashboard at http://127.0.0.1:9119/ — run `hermes dashboard` to start it. Leave sessionUrl unset to suppress the chip.",
       "live-agent-1":  { "role": "Council Live",  "mode": "live",  "sessionUrl": "http://127.0.0.1:18789/?agent=live-agent-1" },
       "live-agent-2":  { "role": "Council Live",  "mode": "live",  "sessionUrl": "http://127.0.0.1:18789/?agent=live-agent-2" },
       "viewer-agent":  { "role": "Viewer Bridge", "mode": "viewer" }

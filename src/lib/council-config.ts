@@ -15,9 +15,10 @@ export type AgentMode = "operator" | "live" | "viewer" | "bridge";
 export type AgentProfile = {
   role: string;
   mode: AgentMode;
-  // Optional URL to the agent's main session in its native web UI (openclaw control on
-  // 18789, hermes web, etc.). Surfaced as a "open session" shortcut in the Council Comms
-  // card. Lives only in council.config.local.json — example uses generic placeholders.
+  // Optional URL to the agent's main session in its native web UI. Two patterns we ship:
+  //   • OpenClaw-managed agents — http://127.0.0.1:18789/?agent=<name> (openclaw gateway)
+  //   • Hermes-managed agents   — http://127.0.0.1:9119/ (run `hermes dashboard` to start)
+  // Surfaced as an "open session" chip in Council Comms. Leave unset to suppress the chip.
   sessionUrl?: string;
 };
 

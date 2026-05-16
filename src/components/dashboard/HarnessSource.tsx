@@ -60,6 +60,20 @@ const FEATURES: Feature[] = [
 
   // === Hermes native ===
   {
+    label: "Hermes Dashboard (local)",
+    description: "Bundled Hermes web UI on localhost:9119 — manages config, API keys, and sessions. Start it with `hermes dashboard`. This is where meru's session chip in Council Comms points.",
+    url: "http://127.0.0.1:9119/",
+    icon: Network,
+    scope: "hermes",
+  },
+  {
+    label: "Hermes Docs",
+    description: "Official NousResearch documentation site for Hermes Agent — features, CLI reference, profiles, integrations.",
+    url: "https://hermes-agent.nousresearch.com/docs/",
+    icon: ScrollText,
+    scope: "hermes",
+  },
+  {
     label: "Smart Model Router",
     description: "Hermes's OpenAI-compatible local router on port 8877. As of 2026-05-16 delegates to Smart Fallback v5 — but the HTTP shell is native Hermes.",
     url: "http://127.0.0.1:8877/health",
@@ -68,7 +82,13 @@ const FEATURES: Feature[] = [
   },
   {
     label: "Hermes CLI Sessions",
-    description: "Saved sessions at ~/.hermes/sessions/. The Hermes CLI ships with its own session viewer and replay tools.",
+    description: "Saved sessions at ~/.hermes/sessions/. The Hermes CLI ships with its own session viewer and replay tools — used for CLI-driven runs separate from the dashboard.",
+    icon: ScrollText,
+    scope: "hermes",
+  },
+  {
+    label: "Telegram-driven runs",
+    description: "Hermes-managed agents (meru) can also accept input through Telegram via the channel set in TELEGRAM_HOME_CHANNEL. The current Telegram session is tracked in ~/.openclaw/workspace/data/meru-telegram-session.json.",
     icon: ScrollText,
     scope: "hermes",
   },
