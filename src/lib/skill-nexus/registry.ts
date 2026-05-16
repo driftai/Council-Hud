@@ -11,6 +11,7 @@ import { skillEvolverAdapter } from "./adapters/skill-evolver";
 import { projectDocsAdapter } from "./adapters/project-docs";
 import { syncStatusAdapter } from "./adapters/sync-status";
 import { genericJsonAdapter } from "./adapters/generic-json";
+import { experimentResultsAdapter } from "./adapters/experiment-results";
 
 const REGISTRY: Record<string, SkillNexusAdapter> = {
   [skillRootAdapter.type]: skillRootAdapter,
@@ -21,6 +22,7 @@ const REGISTRY: Record<string, SkillNexusAdapter> = {
   [projectDocsAdapter.type]: projectDocsAdapter,
   [syncStatusAdapter.type]: syncStatusAdapter,
   [genericJsonAdapter.type]: genericJsonAdapter,
+  [experimentResultsAdapter.type]: experimentResultsAdapter,
 };
 
 export function resolveAdapter(type: string): SkillNexusAdapter | null {

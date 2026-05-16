@@ -1,26 +1,79 @@
 import "server-only";
 
+import { promises as fs } from "node:fs";
+
 import type { SkillNexusAdapter, SkillNexusDomainSnapshot, SkillNexusItem } from "../types";
 import type { SkillNexusDomainConfig } from "@/lib/council-config";
 import { loadCouncilConfig } from "@/lib/council-config";
 import { clampText, isStale, redactAgentNames, safeReadText, shortHash } from "../helpers";
 
+// Read just the last `tailBytes` of a file. For JSONL feeds whose files grow without bound
+// (evolution history at 15k+ entries) we don't want to suck the whole thing into memory each
+// scan. Returns the tail with the first (likely truncated) line dropped so JSON.parse holds.
+async function safeTailRead(path: string, tailBytes: number): Promise<
+  { content: string; size: number; mtime: number; tailed: true } | { oversized: true; size: number; mtime: number } | null
+> {
+  try {
+    const stat = await fs.stat(path);
+    const size = stat.size;
+    const mtime = stat.mtimeMs;
+    if (size <= tailBytes) {
+      const content = await fs.readFile(path, "utf8");
+      return { content, size, mtime, tailed: false } as any;
+    }
+    const fh = await fs.open(path, "r");
+    try {
+      const start = size - tailBytes;
+      const buf = Buffer.alloc(tailBytes);
+      await fh.read(buf, 0, tailBytes, start);
+      const raw = buf.toString("utf8");
+      // Drop the first line which is almost certainly a partial record.
+      const firstNewline = raw.indexOf("\n");
+      const content = firstNewline >= 0 ? raw.slice(firstNewline + 1) : raw;
+      return { content, size, mtime, tailed: true };
+    } finally {
+      await fh.close();
+    }
+  } catch {
+    return null;
+  }
+}
+
 // Report File adapter: reads a single JSON or JSONL file of entries (e.g. validation reports,
 // council status snapshots, build outputs). Each entry becomes a Skill Nexus item with
 // status derived from common fields (ok/level/severity/passed/error).
+//
+// JSONL feeds can opt into tail-only reads via source.tailKB to handle ever-growing logs
+// without loading the whole file each scan.
 export const reportFileAdapter: SkillNexusAdapter = {
   type: "reportFile",
   async scan(domain: SkillNexusDomainConfig): Promise<SkillNexusDomainSnapshot> {
     const cfg = loadCouncilConfig();
     const path = String(domain.source?.path || "").trim();
     const format = String(domain.source?.format || (path.endsWith(".jsonl") ? "jsonl" : "json")).toLowerCase();
+    const tailKBSource = domain.source?.tailKB;
+    const tailKB = typeof tailKBSource === "number" && tailKBSource > 0 ? tailKBSource : 0;
     const now = Date.now();
 
     if (!path) {
       return baseSnapshot(domain, "unreachable", "Source path is empty.");
     }
 
-    const read = await safeReadText(path, cfg.skillNexus.maxFileBytes);
+    // For JSONL feeds, default to tail-mode if no explicit tailKB is set — these are append-only
+    // time-series files and reading the whole thing is wasteful.
+    const effectiveTailKB = tailKB > 0
+      ? tailKB
+      : (format === "jsonl" ? 512 : 0);
+
+    let read:
+      | Awaited<ReturnType<typeof safeReadText>>
+      | { content: string; size: number; mtime: number; tailed?: boolean };
+
+    if (effectiveTailKB > 0) {
+      read = await safeTailRead(path, effectiveTailKB * 1024) as any;
+    } else {
+      read = await safeReadText(path, cfg.skillNexus.maxFileBytes);
+    }
     if (!read) {
       return baseSnapshot(domain, "unreachable", "Report file not reachable.");
     }
@@ -46,10 +99,20 @@ export const reportFileAdapter: SkillNexusAdapter = {
       return baseSnapshot(domain, "degraded", `Parse error: ${parseError?.message || "invalid JSON"}`);
     }
 
+    const totalEntries = entries.length;
+
+    // For time-series JSONL (evolution history, judge outputs, etc.) the newest entries
+    // are at the end. Slice the tail so the freshest 200 records are what surfaces.
+    // domain.source.order can override this if a feed is ordered newest-first.
+    const order = String(domain.source?.order || (format === "jsonl" ? "newest-last" : "as-is"));
+    const visible = order === "newest-last"
+      ? entries.slice(-200).reverse()
+      : entries.slice(0, 200);
+
     const items: SkillNexusItem[] = [];
     let problemCount = 0;
 
-    for (const entry of entries.slice(0, 200)) {
+    for (const entry of visible) {
       if (!entry || typeof entry !== "object") continue;
       const rawName = String(entry.name || entry.title || entry.id || entry.skill || entry.key || "entry");
       const name = clampText(redactAgentNames(rawName), 80);
@@ -70,7 +133,7 @@ export const reportFileAdapter: SkillNexusAdapter = {
 
     const stale = isStale(read.mtime, 7);
     const warnings: string[] = [];
-    if (entries.length > 200) warnings.push(`Truncated at 200 entries (file had ${entries.length}).`);
+    if (totalEntries > 200) warnings.push(`Showing ${order === "newest-last" ? "freshest" : "first"} 200 of ${totalEntries} entries.`);
     if (stale) warnings.push("Report file has not been updated in over a week.");
 
     return {
@@ -102,18 +165,30 @@ function inferStatus(entry: any): SkillNexusItem["status"] {
   if (entry.deprecated === true) return "deprecated";
   if (entry.duplicate === true) return "duplicate";
   if (entry.conflict === true) return "conflicted";
+  // Evolution-experiment shape: { kept: bool, improvement: number, score: number }
+  if (entry.kept === true) return "ok";
+  if (entry.kept === false) return "deprecated";
   if (entry.passed === true || entry.ok === true || entry.success === true) return "ok";
   return "ok";
 }
 
 function extractMeta(entry: any): Record<string, string | number | boolean> {
   const meta: Record<string, string | number | boolean> = {};
-  for (const key of ["score", "version", "agent", "kind", "type", "severity", "level", "count"]) {
+  // Generic + evolution-experiment fields. Numbers are rounded to keep payload tidy.
+  for (const key of [
+    "score", "version", "agent", "kind", "type", "severity", "level", "count",
+    "experiment", "improvement", "kept", "magnitude", "verdict", "judge", "model",
+  ]) {
     const value = entry[key];
     if (typeof value === "string" && value.length < 80) meta[key] = value;
-    if (typeof value === "number" && Number.isFinite(value)) meta[key] = value;
+    if (typeof value === "number" && Number.isFinite(value)) {
+      // Trim noisy floats (0.8123456789 → 0.812).
+      meta[key] = Number.isInteger(value) ? value : Math.round(value * 1000) / 1000;
+    }
     if (typeof value === "boolean") meta[key] = value;
   }
+  // Mutation count signal from evolution records.
+  if (Array.isArray(entry.mutations)) meta["mutations"] = entry.mutations.length;
   return meta;
 }
 
