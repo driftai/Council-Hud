@@ -41,7 +41,8 @@
     "//": [
       "Skill Nexus is a federated registry of monitored skill-domains. Each entry below is one source",
       "the HUD will scan and surface in the Skill Nexus card. Real paths/endpoints go in council.config.local.json.",
-      "Supported types: skillRoot, skillForge, skillEvolver, sessionMiner, reportFile, projectDocs, syncStatus, genericJson."
+      "Supported types: skillRoot, skillForge, skillEvolver, sessionMiner, reportFile, projectDocs,",
+      "                 syncStatus, genericJson, experimentResults."
     ],
     "enabled": true,
     "pollIntervalMs": 20000,
@@ -89,6 +90,25 @@
         "type": "reportFile",
         "enabled": true,
         "source": { "path": "/path/to/skill-validation.jsonl", "format": "jsonl" }
+      },
+      {
+        "id": "evolution-history",
+        "label": "Evolution Trials",
+        "type": "reportFile",
+        "enabled": false,
+        "source": {
+          "path": "/path/to/autoresearch/history.jsonl",
+          "format": "jsonl",
+          "order": "newest-last",
+          "tailKB": 512
+        }
+      },
+      {
+        "id": "experiment-results",
+        "label": "Judge Verdicts",
+        "type": "experimentResults",
+        "enabled": false,
+        "source": { "path": "/path/to/autoresearch/results", "limit": 60 }
       },
       {
         "id": "project-docs",

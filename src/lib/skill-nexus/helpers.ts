@@ -46,11 +46,10 @@ export async function safeReadText(
 }
 
 // Redact configured agent names + common operator handles from a free-text string. SKILL.md
-// descriptions and evolver reasoning fields routinely cite real agent names (e.g. "Drift uses
-// this when…", "Iris triggers", "Eve's daily check"); leaving them through would leak the
-// same identifiers the rest of the HUD scrubs. Lowercase variants are NOT redacted because
-// many agent names overlap with common shell/code words (echo, prime, novelty) — only the
-// capitalized standalone form is replaced.
+// descriptions and evolver reasoning fields routinely cite real agent names (e.g. an agent
+// label, an operator handle, a role identifier); leaving them through would leak identifiers
+// the rest of the HUD scrubs. Lowercase variants are NOT redacted because many agent names
+// overlap with common shell/code words — only the capitalized standalone form is replaced.
 //
 // Replacement strategy: each configured agent gets a generic placeholder based on its mode
 // (operator → "the operator", live → "a live agent", viewer → "a viewer agent", bridge → "a bridge").
