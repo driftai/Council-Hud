@@ -722,7 +722,7 @@ function DomainPanel({
               {statusFilter === "problems" ? "No problems in this domain." : "No items yet."}
             </div>
           ) : (
-            visible.slice(0, 200).map((item) => {
+            visible.slice(0, 200).map((item, idx) => {
               const meta = item.meta || {};
               const imcLevel = typeof meta.imc === "string" ? meta.imc : "";
               const imcScore = typeof meta.imcScore === "number" ? meta.imcScore : undefined;
@@ -730,7 +730,7 @@ function DomainPanel({
               const hasImc = Boolean(imcLevel || imcScore !== undefined || judgment);
               return (
                 <div
-                  key={item.id}
+                  key={`${item.id}-${idx}`}
                   className={cn(
                     "rounded border px-2 py-1 font-mono text-[10px]",
                     STATUS_TONE[item.status || "ok"]
@@ -1149,7 +1149,7 @@ function InsightsPanel({ report, expanded }: { report: SkillNexusReport | null; 
             </h4>
             <div className="space-y-1">
               {passing.map(({ item, domain, score }, idx) => (
-                <div key={item.id} className="flex items-center gap-2 rounded border border-white/10 bg-black/20 px-2 py-1 font-mono text-[10px]">
+                <div key={`${domain.id}:${item.id}:${idx}`} className="flex items-center gap-2 rounded border border-white/10 bg-black/20 px-2 py-1 font-mono text-[10px]">
                   <span className="w-5 shrink-0 text-center text-[9px] text-muted-foreground/70">#{idx + 1}</span>
                   <span className={cn("shrink-0 inline-flex items-center gap-1 rounded border px-1.5 text-[8px] uppercase", IMC_TONE[String(item.meta?.imc || "good")] || "border-primary/30 text-primary")}>
                     <Gauge className="h-2.5 w-2.5" />
@@ -1188,12 +1188,12 @@ function InsightsPanel({ report, expanded }: { report: SkillNexusReport | null; 
                     )}
                   </div>
                   <p className="mt-0.5 flex flex-wrap gap-1 text-[8px] opacity-70">
-                    {entry.evolved.slice(0, 5).map(({ item }) => {
+                    {entry.evolved.slice(0, 5).map(({ item }, evolvedIdx) => {
                       const score = typeof item.meta?.imcScore === "number" ? item.meta.imcScore : null;
                       const judgment = String(item.meta?.judgment || "");
                       return (
                         <span
-                          key={item.id}
+                          key={`${entry.parent}:${item.id}:${evolvedIdx}`}
                           className={cn(
                             "rounded border px-1",
                             judgment === "promote" ? "border-secondary/40 text-secondary"
@@ -1260,8 +1260,8 @@ function InsightsPanel({ report, expanded }: { report: SkillNexusReport | null; 
               <Clock className="h-3 w-3" /> Changed in last 7 days
             </h4>
             <div className="space-y-1">
-              {recent.map(({ item, domain }) => (
-                <div key={`recent-${item.id}`} className="flex items-center gap-2 rounded border border-white/10 bg-black/20 px-2 py-1 font-mono text-[10px]">
+              {recent.map(({ item, domain }, idx) => (
+                <div key={`recent-${domain.id}:${item.id}:${idx}`} className="flex items-center gap-2 rounded border border-white/10 bg-black/20 px-2 py-1 font-mono text-[10px]">
                   <span className={cn("shrink-0 rounded border px-1 text-[8px] uppercase", STATUS_TONE[item.status || "ok"])}>
                     {item.status || "ok"}
                   </span>

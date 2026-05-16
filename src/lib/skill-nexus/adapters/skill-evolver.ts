@@ -18,6 +18,9 @@ import { clampText, isStale, redactAgentNames, safeReadText, shortHash, stripMar
 //   - statePath:    JSON of current evolution state / best genome / pending runs
 //   - appliedPath:  JSON of last applied genome
 //   - logPath:      optional JSONL of run history
+//   - maxFileBytes: per-domain byte cap that overrides skillNexus.maxFileBytes for the
+//                   bulky state/applied/log files. Use when state.json grows past 512KB
+//                   (heavily-iterated evolvers do — that's expected, not a failure).
 export const skillEvolverAdapter: SkillNexusAdapter = {
   type: "skillEvolver",
   async scan(domain: SkillNexusDomainConfig): Promise<SkillNexusDomainSnapshot> {
@@ -27,6 +30,15 @@ export const skillEvolverAdapter: SkillNexusAdapter = {
     const statePath = String(domain.source?.statePath || "").trim();
     const appliedPath = String(domain.source?.appliedPath || "").trim();
     const logPath = String(domain.source?.logPath || "").trim();
+    // Per-domain byte cap with a sensible 4 MB floor for the state files specifically
+    // (parent skill walks still use the global cap to stay tight). state.json grows
+    // unboundedly on heavily-iterated evolvers, and silently skipping it loses the
+    // best-score / pending-runs signal entirely.
+    const stateMaxBytes = Math.max(
+      Number(domain.source?.maxFileBytes || 0) || 0,
+      cfg.skillNexus.maxFileBytes,
+      4 * 1024 * 1024,
+    );
     const now = Date.now();
     const warnings: string[] = [];
 
@@ -207,7 +219,7 @@ export const skillEvolverAdapter: SkillNexusAdapter = {
 
     // --- Optional state.json: surfaces current best-score / pending evolutions ---
     if (statePath) {
-      const read = await safeReadText(statePath, cfg.skillNexus.maxFileBytes);
+      const read = await safeReadText(statePath, stateMaxBytes);
       if (read && !("oversized" in read)) {
         lastEvolutionActivity = Math.max(lastEvolutionActivity, read.mtime);
         try {
@@ -247,7 +259,7 @@ export const skillEvolverAdapter: SkillNexusAdapter = {
 
     // --- Optional appliedPath: last applied genome ---
     if (appliedPath) {
-      const read = await safeReadText(appliedPath, cfg.skillNexus.maxFileBytes);
+      const read = await safeReadText(appliedPath, stateMaxBytes);
       if (read && !("oversized" in read)) {
         lastEvolutionActivity = Math.max(lastEvolutionActivity, read.mtime);
         try {
@@ -275,7 +287,7 @@ export const skillEvolverAdapter: SkillNexusAdapter = {
 
     // --- Optional logPath: append run history entries ---
     if (logPath) {
-      const read = await safeReadText(logPath, cfg.skillNexus.maxFileBytes);
+      const read = await safeReadText(logPath, stateMaxBytes);
       if (read && !("oversized" in read)) {
         lastEvolutionActivity = Math.max(lastEvolutionActivity, read.mtime);
         const lines = read.content

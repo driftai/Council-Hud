@@ -132,7 +132,8 @@ export const reportFileAdapter: SkillNexusAdapter = {
     const items: SkillNexusItem[] = [];
     let problemCount = 0;
 
-    for (const entry of visible) {
+    for (let visibleIdx = 0; visibleIdx < visible.length; visibleIdx += 1) {
+      const entry = visible[visibleIdx];
       if (!entry || typeof entry !== "object") continue;
       const rawName = String(entry.name || entry.title || entry.id || entry.skill || entry.key || "entry");
       const name = clampText(redactAgentNames(rawName), 80);
@@ -140,8 +141,11 @@ export const reportFileAdapter: SkillNexusAdapter = {
       const status = inferStatus(entry);
       if (status !== "ok" && status !== "pending") problemCount += 1;
       const mtime = Number(entry.timestamp || entry.mtime || entry.updatedAt || read.mtime) || read.mtime;
+      // Include position index in the id so repeated log lines (e.g. "📊 Orphaned
+      // cleanup: 0 found..." appearing across multiple runs of a forge pipeline) get
+      // distinct ids — otherwise React's render-time key check trips on duplicates.
       items.push({
-        id: shortHash(`${rawName}|${entry.id || ""}|${entry.severity || ""}`),
+        id: shortHash(`${rawName}|${entry.id || ""}|${entry.severity || ""}|${entry.timestamp || ""}|${visibleIdx}`),
         name,
         description,
         mtime,
