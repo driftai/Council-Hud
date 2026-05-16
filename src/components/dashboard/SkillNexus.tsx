@@ -12,8 +12,10 @@ import {
   BookOpen,
   Boxes,
   Brain,
+  Check,
   Clock,
   Cog,
+  Copy,
   Database,
   Dna,
   FileWarning,
@@ -456,6 +458,54 @@ function OverviewPanel({
   );
 }
 
+// Pull a human-readable failure reason from an item's status + description + meta. Adapters
+// stuff different shapes here (judge subscores under llm_*, evolution kept/improvement,
+// skill-root duplicate/stale, etc.) so this digests them into one line per row.
+function reasonFor(item: SkillNexusItem): string {
+  const m = (item.meta || {}) as Record<string, unknown>;
+  const parts: string[] = [];
+
+  // Experiment-results judge fails: surface composite + which judge dragged it down.
+  if (typeof m.composite === "number") {
+    parts.push(`composite ${m.composite}`);
+    const judgeKeys = Object.keys(m).filter((k) => k.startsWith("judge_"));
+    if (judgeKeys.length > 0) {
+      // Find the weakest judge (lowest score).
+      let weakest = judgeKeys[0];
+      let weakestScore = Number(m[weakest]);
+      for (const k of judgeKeys) {
+        const v = Number(m[k]);
+        if (Number.isFinite(v) && v < weakestScore) { weakest = k; weakestScore = v; }
+      }
+      parts.push(`${weakest.replace(/^judge_/, "")} ${weakestScore}`);
+    }
+    // LLM judge sub-dimensions (task/error/token/decision/context) when present.
+    const llmDims = Object.keys(m).filter((k) => k.startsWith("llm_"));
+    if (llmDims.length > 0) {
+      const subs = llmDims.map((k) => `${k.replace(/^llm_/, "")}=${m[k]}`).join(" ");
+      parts.push(`llm[${subs}]`);
+    }
+    if (typeof m.tested === "string" && m.tested) parts.push(`tested: ${m.tested}`);
+  }
+
+  // Evolution-history rows (kept=false, negative improvement).
+  if (typeof m.improvement === "number" && typeof m.kept === "boolean") {
+    if (!parts.length) parts.push(`improvement ${m.improvement}, ${m.kept ? "kept" : "rejected"}`);
+  }
+
+  // Skill-evolver lineage failures.
+  if (typeof m.failure_reason === "string" && m.failure_reason) {
+    parts.push(`reason: ${m.failure_reason}`);
+  }
+
+  // Skill-root signals.
+  if (item.relativePath) parts.push(item.relativePath);
+
+  // Fallback to description if we haven't extracted anything yet.
+  if (parts.length === 0 && item.description) parts.push(item.description);
+  return parts.join(" · ");
+}
+
 function IssuesPanel({
   report,
   warnings,
@@ -465,21 +515,90 @@ function IssuesPanel({
   warnings: Array<{ domainId: string; domainLabel: string; warning: string }>;
   onJumpToDomain: (id: string) => void;
 }) {
+  const [copied, setCopied] = useState(false);
+
   const problems = useMemo(() => {
     if (!report) return [];
-    const out: Array<{ domain: DomainSnapshot; item: SkillNexusItem }> = [];
+    const out: Array<{ domain: DomainSnapshot; item: SkillNexusItem; reason: string }> = [];
     for (const domain of report.domains) {
       for (const item of domain.items) {
+        // Catch every fail-like status: error, stale, duplicate, conflicted, missing,
+        // oversized, deprecated. Pending and candidate are in-flight, not fails.
         if (item.status && item.status !== "ok" && item.status !== "pending" && item.status !== "candidate") {
-          out.push({ domain, item });
+          out.push({ domain, item, reason: reasonFor(item) });
         }
       }
     }
+    // Surface judge-failed experiments at the top — they're often the most actionable.
+    out.sort((a, b) => {
+      const aJudge = a.domain.id === "experiment-results" || a.domain.id === "evolution-history" ? 0 : 1;
+      const bJudge = b.domain.id === "experiment-results" || b.domain.id === "evolution-history" ? 0 : 1;
+      return aJudge - bJudge;
+    });
     return out;
   }, [report]);
 
+  const copyAll = useCallback(async () => {
+    const lines: string[] = [];
+    lines.push(`Skill Nexus — Issues Report (${new Date().toISOString()})`);
+    lines.push("");
+    if (warnings.length > 0) {
+      lines.push(`# Domain warnings (${warnings.length})`);
+      for (const w of warnings) {
+        lines.push(`  [${w.domainLabel}] ${w.warning}`);
+      }
+      lines.push("");
+    }
+    if (problems.length > 0) {
+      lines.push(`# Item problems (${problems.length})`);
+      for (const p of problems) {
+        const line = `  [${p.item.status?.toUpperCase()}] ${p.domain.label} · ${p.item.name}`;
+        lines.push(line);
+        if (p.reason) lines.push(`      ${p.reason}`);
+      }
+    }
+    if (warnings.length === 0 && problems.length === 0) {
+      lines.push("All clear — no warnings or item problems.");
+    }
+    const text = lines.join("\n");
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // Clipboard API can fail (e.g. unfocused tab) — fallback: select an off-screen textarea.
+      const el = document.createElement("textarea");
+      el.value = text;
+      document.body.appendChild(el);
+      el.select();
+      try { document.execCommand("copy"); } catch { /* swallow */ }
+      document.body.removeChild(el);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    }
+  }, [warnings, problems]);
+
+  const total = warnings.length + problems.length;
+
   return (
     <div className="space-y-3">
+      <div className="flex items-center justify-between gap-2">
+        <span className="font-mono text-[9px] uppercase text-muted-foreground">
+          {total === 0 ? "0 issues" : `${total} total · ${warnings.length} warning${warnings.length === 1 ? "" : "s"} · ${problems.length} fail${problems.length === 1 ? "" : "s"}`}
+        </span>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          className="h-6 border-white/10 bg-transparent px-2 py-0 font-mono text-[9px] uppercase hover:bg-white/5"
+          onClick={() => void copyAll()}
+          disabled={total === 0}
+          title="Copy every warning + every fail with reasons to clipboard"
+        >
+          {copied ? <Check className="mr-1 h-3 w-3 text-secondary" /> : <Copy className="mr-1 h-3 w-3" />}
+          {copied ? "Copied" : "Copy all"}
+        </Button>
+      </div>
       <ScrollArea className="h-[320px] rounded border border-white/10 bg-black/30 p-2">
         <div className="space-y-2">
           {warnings.length === 0 && problems.length === 0 && (
@@ -502,20 +621,25 @@ function IssuesPanel({
               </div>
             </div>
           ))}
-          {problems.map(({ domain, item }) => (
+          {problems.map(({ domain, item, reason }) => (
             <div key={`prob-${domain.id}-${item.id}`} className={cn("flex items-start gap-2 rounded border px-2 py-1.5 font-mono text-[10px]", STATUS_TONE[item.status || "error"])}>
               <span className="shrink-0 rounded border px-1 text-[8px] uppercase">{item.status}</span>
               <div className="min-w-0 flex-1">
-                <button
-                  type="button"
-                  onClick={() => onJumpToDomain(domain.id)}
-                  className="truncate font-bold hover:underline"
-                >
-                  {item.name}
-                </button>
-                <p className="truncate text-[9px] opacity-80">
-                  {domain.label}{item.relativePath ? ` · ${item.relativePath}` : ""}
-                </p>
+                <div className="flex items-baseline gap-2">
+                  <button
+                    type="button"
+                    onClick={() => onJumpToDomain(domain.id)}
+                    className="truncate font-bold hover:underline"
+                  >
+                    {item.name}
+                  </button>
+                  <span className="shrink-0 text-[8px] uppercase opacity-60">{domain.label}</span>
+                </div>
+                {reason && (
+                  <p className="truncate text-[9px] opacity-80" title={reason}>
+                    {reason}
+                  </p>
+                )}
               </div>
             </div>
           ))}
