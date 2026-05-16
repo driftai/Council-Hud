@@ -11,7 +11,9 @@ export type SkillItemStatus =
   | "error"
   | "pending"
   | "candidate"
-  | "deprecated";
+  | "deprecated"
+  | "rejected"; // Expected outcome (e.g. evolution trial with kept=false / improvement<0).
+                // Treated as non-problem in the IssuesPanel since rejection is by design.
 
 export type SkillNexusItem = {
   // Stable per-snapshot id (hash of name + relativePath + source).

@@ -35,7 +35,8 @@ import {
 
 type SkillItemStatus =
   | "ok" | "stale" | "duplicate" | "conflicted" | "missing"
-  | "oversized" | "error" | "pending" | "candidate" | "deprecated";
+  | "oversized" | "error" | "pending" | "candidate" | "deprecated"
+  | "rejected"; // Expected non-promotion outcome — not flagged as a problem.
 
 type SkillNexusItem = {
   id: string;
@@ -105,6 +106,9 @@ const STATUS_TONE: Record<string, string> = {
   pending: "border-primary/30 text-primary bg-primary/5",
   candidate: "border-fuchsia-400/40 text-fuchsia-300 bg-fuchsia-500/5",
   deprecated: "border-muted-foreground/30 text-muted-foreground bg-muted/10",
+  // "rejected" is rendered with the same muted tone as deprecated but is intentionally
+  // not flagged as a problem — see IssuesPanel filter.
+  rejected: "border-muted-foreground/20 text-muted-foreground/80 bg-muted/5",
 };
 
 const HEALTH_TONE: Record<DomainHealth, string> = {
@@ -524,7 +528,10 @@ function IssuesPanel({
       for (const item of domain.items) {
         // Catch every fail-like status: error, stale, duplicate, conflicted, missing,
         // oversized, deprecated. Pending and candidate are in-flight, not fails.
-        if (item.status && item.status !== "ok" && item.status !== "pending" && item.status !== "candidate") {
+        // Skip in-flight states (pending, candidate) AND expected non-promotion outcomes
+        // (rejected). Most evolution trials reject by design — flagging them as problems
+        // turns the Issues feed into noise.
+        if (item.status && item.status !== "ok" && item.status !== "pending" && item.status !== "candidate" && item.status !== "rejected") {
           out.push({ domain, item, reason: reasonFor(item) });
         }
       }

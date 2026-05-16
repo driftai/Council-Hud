@@ -112,8 +112,12 @@ export const experimentResultsAdapter: SkillNexusAdapter = {
       }
 
       if (kept) keptCount += 1;
-      const status: SkillNexusItem["status"] = kept ? "ok" : (improvement < 0 ? "error" : "deprecated");
-      if (status !== "ok") problemCount += 1;
+      // Non-kept trials (the vast majority of evolutionary trials) are expected outcomes,
+      // not errors. Map them to "rejected" so they don't flood the Issues feed — and don't
+      // count them in problemCount either, since the domain header would otherwise show
+      // 60/60 problems and tint the whole panel red.
+      const status: SkillNexusItem["status"] = kept ? "ok" : "rejected";
+      if (status !== "ok" && status !== "rejected") problemCount += 1;
 
       // Surface judge sub-scores in meta keyed by judge name, plus the llm_judge breakdown
       // (task / error / token / decision / context) parsed from details when present.

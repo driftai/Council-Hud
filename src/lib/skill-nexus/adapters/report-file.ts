@@ -139,7 +139,8 @@ export const reportFileAdapter: SkillNexusAdapter = {
       const name = clampText(redactAgentNames(rawName), 80);
       const description = clampText(redactAgentNames(String(entry.description || entry.summary || entry.message || "")), 200);
       const status = inferStatus(entry);
-      if (status !== "ok" && status !== "pending") problemCount += 1;
+      // "rejected" is an expected outcome (most evolution trials regress) — not a problem.
+      if (status !== "ok" && status !== "pending" && status !== "rejected") problemCount += 1;
       const mtime = Number(entry.timestamp || entry.mtime || entry.updatedAt || read.mtime) || read.mtime;
       // Include position index in the id so repeated log lines (e.g. "📊 Orphaned
       // cleanup: 0 found..." appearing across multiple runs of a forge pipeline) get
@@ -155,10 +156,16 @@ export const reportFileAdapter: SkillNexusAdapter = {
       });
     }
 
-    const stale = isStale(read.mtime, 7);
+    // Per-domain staleness threshold (days). Defaults to 7 days but archival logs and
+    // low-frequency feeds (Skill Forge runs hourly but the LOG rotates weekly; Council
+    // Signal is a snapshot file that updates on incident) should set staleDays higher
+    // or 0 to disable the staleness warning entirely.
+    const staleDaysSource = domain.source?.staleDays;
+    const staleDays = typeof staleDaysSource === "number" ? staleDaysSource : 7;
+    const stale = staleDays > 0 ? isStale(read.mtime, staleDays) : false;
     const warnings: string[] = [];
     if (totalEntries > 200) warnings.push(`Showing ${order === "newest-last" ? "freshest" : "first"} 200 of ${totalEntries} entries.`);
-    if (stale) warnings.push("Report file has not been updated in over a week.");
+    if (stale) warnings.push(`Report file has not been updated in over ${staleDays} day${staleDays === 1 ? "" : "s"}.`);
 
     return {
       id: domain.id,
@@ -190,8 +197,10 @@ function inferStatus(entry: any): SkillNexusItem["status"] {
   if (entry.duplicate === true) return "duplicate";
   if (entry.conflict === true) return "conflicted";
   // Evolution-experiment shape: { kept: bool, improvement: number, score: number }
+  // kept=false is the NORMAL outcome for most mutation trials — we treat it as a
+  // "rejected" non-problem rather than "deprecated", which is for actual deprecation.
   if (entry.kept === true) return "ok";
-  if (entry.kept === false) return "deprecated";
+  if (entry.kept === false) return "rejected";
   if (entry.passed === true || entry.ok === true || entry.success === true) return "ok";
   return "ok";
 }

@@ -113,9 +113,30 @@ export const skillRootAdapter: SkillNexusAdapter = {
       const name = clampText(baseName, 80);
       const stale = isStale(read.mtime, 90);
 
+      // Duplicate detection: only flag when the **canonical SKILL.md** of two different
+      // skill folders carries the same title (or the same folder name). Don't flag
+      // structural per-folder files like _meta.json / evolution_meta.json /
+      // DESCRIPTION.md / package.json / openai.yaml / LICENSE.txt — those are
+      // expected to repeat once per skill folder by design.
+      const STRUCTURAL_FILES = new Set([
+        "_meta.json", "evolution_meta.json", "package.json",
+        "openai.yaml", "license.txt", "notice.txt", "description.md",
+        "readme.md", "index.js", "__init__.py", "tsconfig.json",
+      ]);
+      const fileBase = (relPath.split("/").pop() || "").toLowerCase();
+      const isStructural = STRUCTURAL_FILES.has(fileBase);
+      // The evolver clones a parent skill into `<name>-evolved/` while a trial is alive.
+      // Both folders carry the same title by design — the Skill Evolver adapter handles
+      // the parent/child pairing already, so exclude evolved variants from dupe accounting.
+      const folderName = (skillFolder.split("/").pop() || "").toLowerCase();
+      const isEvolvedVariant = folderName.endsWith("-evolved");
+      // Only canonical skill markers participate in duplicate accounting.
+      const eligibleForDupe = file.type === "skill.md" && !isStructural && !isEvolvedVariant;
       const dupeKey = name.toLowerCase();
-      const dupeCount = (seenNames.get(dupeKey) || 0) + 1;
-      seenNames.set(dupeKey, dupeCount);
+      const dupeCount = eligibleForDupe
+        ? ((seenNames.get(dupeKey) || 0) + 1)
+        : 0;
+      if (eligibleForDupe) seenNames.set(dupeKey, dupeCount);
 
       // Missing-description warning per the original spec.
       const missingDescription = file.type === "skill.md" && !preview.description;
