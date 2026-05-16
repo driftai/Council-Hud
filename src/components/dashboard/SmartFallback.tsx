@@ -75,6 +75,7 @@ type EngineSnapshot = {
   healthy: number;
   recovering: number;
   blocked: number;
+  decommissioned: number;
   rateLimitedRecently: number;
   models: ModelEntry[];
   generatedAt: number;
@@ -137,14 +138,16 @@ function formatRelativeSeconds(epochSeconds: number) {
   return `${Math.floor(delta / 86400)}d ago`;
 }
 
-function stateLabel(state: CircuitState) {
+function stateLabel(state: CircuitState, cooldownClass?: string) {
+  if (cooldownClass === "decommissioned") return "DEAD";
   if (state === "open") return "BLOCKED";
   if (state === "half_open") return "PROBING";
   if (state === "closed") return "OK";
   return "?";
 }
 
-function stateColor(state: CircuitState) {
+function stateColor(state: CircuitState, cooldownClass?: string) {
+  if (cooldownClass === "decommissioned") return "border-zinc-500/40 text-zinc-400 bg-zinc-500/5";
   if (state === "open") return "border-destructive/40 text-destructive bg-destructive/5";
   if (state === "half_open") return "border-yellow-500/40 text-yellow-400 bg-yellow-500/5";
   if (state === "closed") return "border-secondary/30 text-secondary bg-secondary/5";
@@ -156,7 +159,7 @@ export function SmartFallback() {
   const [picks, setPicks] = useState<AgentPick[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [filter, setFilter] = useState<"watchlist" | "all">("watchlist");
+  const [filter, setFilter] = useState<"watchlist" | "all" | "decommissioned">("watchlist");
   const [busyModel, setBusyModel] = useState<string | null>(null);
   const [reprobing, setReprobing] = useState(false);
   const [reprobeResult, setReprobeResult] = useState<string | null>(null);
@@ -234,12 +237,22 @@ export function SmartFallback() {
 
   const visibleModels = useMemo(() => {
     if (!snapshot) return [];
-    if (filter === "all") return snapshot.models;
-    return snapshot.models.filter((entry) => entry.circuit_state !== "closed");
+    if (filter === "decommissioned") {
+      return snapshot.models.filter((entry) => entry.cooldown_class === "decommissioned");
+    }
+    // Both watchlist + all exclude decommissioned — they live in their own tab so they don't
+    // pollute the active routing view. Watchlist also drops healthy models.
+    const active = snapshot.models.filter((entry) => entry.cooldown_class !== "decommissioned");
+    if (filter === "all") return active;
+    return active.filter((entry) => entry.circuit_state !== "closed");
   }, [snapshot, filter]);
 
   const engineLive = Boolean(snapshot?.engineAvailable);
-  const watchlistCount = snapshot ? snapshot.totalModels - snapshot.healthy : 0;
+  // Watchlist count = anything that isn't healthy AND isn't decommissioned (those are parked).
+  const watchlistCount = snapshot
+    ? snapshot.totalModels - snapshot.healthy - snapshot.decommissioned
+    : 0;
+  const activeTotal = snapshot ? snapshot.totalModels - snapshot.decommissioned : 0;
 
   return (
     <DashboardCard
@@ -370,7 +383,7 @@ export function SmartFallback() {
                 "rounded px-2 py-0.5 font-mono text-[9px] uppercase",
                 filter === "watchlist" ? "bg-primary/20 text-primary" : "text-muted-foreground hover:bg-white/5 hover:text-slate-100"
               )}
-              title="Show only models recovering or blocked"
+              title="Models recovering or blocked (excludes decommissioned and healthy)"
             >
               Watchlist ({watchlistCount})
             </button>
@@ -381,9 +394,20 @@ export function SmartFallback() {
                 "rounded px-2 py-0.5 font-mono text-[9px] uppercase",
                 filter === "all" ? "bg-primary/20 text-primary" : "text-muted-foreground hover:bg-white/5 hover:text-slate-100"
               )}
-              title="Show every tracked model"
+              title="Every actively-routed model (excludes decommissioned)"
             >
-              All ({snapshot?.totalModels ?? 0})
+              Active ({activeTotal})
+            </button>
+            <button
+              type="button"
+              onClick={() => setFilter("decommissioned")}
+              className={cn(
+                "rounded px-2 py-0.5 font-mono text-[9px] uppercase",
+                filter === "decommissioned" ? "bg-zinc-500/20 text-zinc-300" : "text-muted-foreground hover:bg-white/5 hover:text-slate-100"
+              )}
+              title="Models with retired/deprecated provider endpoints — parked permanently with reason kept on record"
+            >
+              Decommissioned ({snapshot?.decommissioned ?? 0})
             </button>
           </div>
           <div className="flex items-center gap-2">
@@ -417,10 +441,13 @@ export function SmartFallback() {
                 <Activity className="h-3 w-3 text-secondary" />
                 {filter === "watchlist"
                   ? "All tracked models healthy."
-                  : engineLive ? "No models tracked yet." : "Engine offline — no data to show."}
+                  : filter === "decommissioned"
+                    ? "No decommissioned models on record."
+                    : engineLive ? "No models tracked yet." : "Engine offline — no data to show."}
               </div>
             ) : (
               visibleModels.map((entry) => {
+                const decommissioned = entry.cooldown_class === "decommissioned";
                 const contextLabel = formatContext(entry.context_window);
                 const bestProvider = entry.providers && entry.providers.length > 0
                   ? [...entry.providers].sort((a, b) => (b.priority ?? 0) - (a.priority ?? 0))[0]
@@ -441,10 +468,10 @@ export function SmartFallback() {
                   )}
                 >
                   <span
-                    className={cn("mt-0.5 shrink-0 rounded border px-1 text-[8px] uppercase", stateColor(entry.circuit_state))}
+                    className={cn("mt-0.5 shrink-0 rounded border px-1 text-[8px] uppercase", stateColor(entry.circuit_state, entry.cooldown_class))}
                     title={`circuit=${entry.circuit_state} class=${entry.cooldown_class}${entry.circuit_opened_at ? ` · opened ${formatRelativeSeconds(entry.circuit_opened_at) || "?"}` : ""}`}
                   >
-                    {stateLabel(entry.circuit_state)}
+                    {stateLabel(entry.circuit_state, entry.cooldown_class)}
                   </span>
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-1.5">
@@ -478,11 +505,12 @@ export function SmartFallback() {
                     </div>
                     <p className="truncate text-[8px] uppercase text-muted-foreground/70">
                       score {Math.round(entry.score)}
-                      {entry.consecutive_failures > 0 && ` · ${entry.consecutive_failures} fail`}
+                      {entry.consecutive_failures > 0 && !decommissioned && ` · ${entry.consecutive_failures} fail`}
                       {entry.total_rate_limits > 0 && ` · ${entry.total_rate_limits} 429`}
                       {entry.total_quota_exhaustions > 0 && ` · ${entry.total_quota_exhaustions} quota`}
                       {entry.avg_latency_ms > 0 && ` · ${Math.round(entry.avg_latency_ms)}ms`}
-                      {entry.cooldown_remaining > 0 && ` · ${formatCooldown(entry.cooldown_remaining)} cooldown`}
+                      {!decommissioned && entry.cooldown_remaining > 0 && ` · ${formatCooldown(entry.cooldown_remaining)} cooldown`}
+                      {decommissioned && ` · permanent block`}
                       {recoveringProgress && ` · ${recoveringProgress}`}
                     </p>
                     {(entry.capabilities?.length || bestProvider || lastProbe) && (
@@ -525,7 +553,7 @@ export function SmartFallback() {
                       </p>
                     )}
                   </div>
-                  {(entry.circuit_state === "open" || entry.circuit_state === "half_open") && (
+                  {(entry.circuit_state === "open" || entry.circuit_state === "half_open") && !decommissioned && (
                     <Button
                       type="button"
                       size="icon"

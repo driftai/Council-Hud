@@ -239,6 +239,7 @@ export type EngineSnapshot = {
   healthy: number;
   recovering: number;
   blocked: number;
+  decommissioned: number;
   rateLimitedRecently: number;
   models: ModelEntry[];
   generatedAt: number;
@@ -275,6 +276,7 @@ export async function getEngineSnapshot(): Promise<EngineSnapshot> {
     healthy: 0,
     recovering: 0,
     blocked: 0,
+    decommissioned: 0,
     rateLimitedRecently: 0,
     models: [],
     generatedAt: Date.now(),
@@ -474,10 +476,17 @@ export async function getEngineSnapshot(): Promise<EngineSnapshot> {
   let healthy = 0;
   let recovering = 0;
   let blocked = 0;
+  let decommissioned = 0;
   for (const entry of entries) {
-    if (entry.circuit_state === "open") blocked += 1;
-    else if (entry.circuit_state === "half_open") recovering += 1;
-    else if (entry.circuit_state === "closed") healthy += 1;
+    if (entry.cooldown_class === "decommissioned") {
+      decommissioned += 1;
+    } else if (entry.circuit_state === "open") {
+      blocked += 1;
+    } else if (entry.circuit_state === "half_open") {
+      recovering += 1;
+    } else if (entry.circuit_state === "closed") {
+      healthy += 1;
+    }
   }
 
   return {
@@ -489,6 +498,7 @@ export async function getEngineSnapshot(): Promise<EngineSnapshot> {
     healthy,
     recovering,
     blocked,
+    decommissioned,
     rateLimitedRecently,
     models: entries,
     generatedAt: Date.now(),
