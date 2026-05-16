@@ -891,18 +891,24 @@ export default function Home() {
             </div>
           </div>
 
-          <div className="lg:col-span-3 xl:col-span-4 2xl:col-span-4 space-y-6 xl:grid xl:grid-cols-2 xl:gap-6 xl:space-y-0 xl:items-start">
+          {/* Right column — auto-fit grid with a 340px floor per cell. Cards never
+              squeeze below 340px (their titles + counts stay readable); when there
+              isn't room for two side-by-side they drop to one column instead. The
+              wide cards (HarnessSource / CouncilComms / SkillNexus) always span the
+              full row. `grid-auto-flow:row dense` packs gaps so the layout stays tidy
+              regardless of card height. */}
+          <div className="lg:col-span-3 xl:col-span-4 2xl:col-span-4 grid grid-cols-1 [grid-template-columns:repeat(auto-fit,minmax(340px,1fr))] gap-6 items-start [grid-auto-flow:row_dense]">
             <AgentRoster />
             <SmartFallback />
             <AutoResearch />
             <AuditTrail />
-            <div className="xl:col-span-2">
+            <div className="col-span-full">
               <HarnessSource />
             </div>
-            <div className="xl:col-span-2">
+            <div className="col-span-full">
               <CouncilComms />
             </div>
-            <div className="xl:col-span-2">
+            <div className="col-span-full">
               <SkillNexus />
             </div>
           </div>

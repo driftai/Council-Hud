@@ -625,6 +625,38 @@ export function CouncilComms() {
           </div>
         )}
 
+        {/* Quick-pick chips for topics any agent is currently subscribed to. Lets Drift
+            jump between filter scopes without typing topic names. Hub-side topic
+            subscriptions are the actual filter mechanism — these chips just surface
+            them client-side so they're usable from the HUD. */}
+        {scope === "topic" && (() => {
+          const knownTopics = Array.from(new Set(
+            (status.sessions || []).flatMap((s) => s.topics || []).filter(Boolean)
+          )).sort();
+          if (knownTopics.length === 0) return null;
+          return (
+            <div className="flex flex-wrap items-center gap-1 rounded border border-white/10 bg-black/20 p-1">
+              <span className="px-1 font-mono text-[8px] uppercase text-muted-foreground/70">Topics</span>
+              {knownTopics.map((t) => (
+                <button
+                  key={t}
+                  type="button"
+                  onClick={() => setTopic(cleanTopicName(t))}
+                  className={cn(
+                    "rounded border px-1.5 py-0.5 font-mono text-[9px] uppercase transition-colors",
+                    cleanTopicName(t) === cleanTopicName(topic)
+                      ? "border-primary/40 bg-primary/10 text-primary"
+                      : "border-white/10 bg-white/[0.02] text-slate-200 hover:border-primary/30 hover:bg-primary/5"
+                  )}
+                  title={`Switch to #${t} topic`}
+                >
+                  #{t}
+                </button>
+              ))}
+            </div>
+          );
+        })()}
+
         <div className="grid grid-cols-2 gap-2">
           {scope === "topic" ? (
             <input

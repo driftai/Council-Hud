@@ -433,12 +433,97 @@ app.get(['/', '/health'], (req, res) => {
     }, 'STABLE', 'HARDWARE_PULSE'));
 });
 
+// Strip absolute home paths from a string so the HUD never renders them verbatim. Same
+// pattern as the audit-trail scrubber on the HUD side, kept here so the wire payload is
+// already clean.
+function scrubPath(text) {
+    if (!text) return '';
+    return String(text)
+        .replace(/C:[\\/]Users[\\/][^\\/\s"']+/gi, '~')
+        .replace(/\/home\/[^/\s"']+/g, '~');
+}
+
+// Cache window titles for ~3 seconds. Get-Process is fast but every /graph hit firing it
+// adds latency to every poll.
+let windowTitleCache = { titles: new Map(), expiresAt: 0 };
+
+async function fetchWindowTitles() {
+    if (!IS_WINDOWS) return new Map();
+    const now = Date.now();
+    if (now < windowTitleCache.expiresAt) return windowTitleCache.titles;
+    return new Promise((resolve) => {
+        // Force UTF-8 output so window titles with non-ASCII chars (em-dashes, curly
+        // quotes, accented vowels in app names) survive the pipe instead of getting
+        // mangled into � replacement chars by the default ANSI codepage.
+        execFile(
+            'powershell.exe',
+            ['-NoProfile', '-NonInteractive', '-Command',
+             "[Console]::OutputEncoding=[Text.Encoding]::UTF8; Get-Process | Where-Object {$_.MainWindowTitle} | Select-Object Id,MainWindowTitle | ConvertTo-Json -Compress"],
+            { timeout: 4000, windowsHide: true, encoding: 'utf8' },
+            (err, stdout) => {
+                const titles = new Map();
+                if (!err && stdout) {
+                    try {
+                        const raw = JSON.parse(stdout);
+                        const list = Array.isArray(raw) ? raw : [raw];
+                        for (const entry of list) {
+                            if (entry && typeof entry.Id === 'number' && entry.MainWindowTitle) {
+                                titles.set(entry.Id, String(entry.MainWindowTitle).slice(0, 200));
+                            }
+                        }
+                    } catch { /* swallow malformed PS output */ }
+                }
+                windowTitleCache = { titles, expiresAt: Date.now() + 3000 };
+                resolve(titles);
+            }
+        );
+    });
+}
+
 app.get('/graph', requireAuth, async (req, res) => {
     try {
-        const processes = await si.processes();
-        const nodes = processes.list.sort((a, b) => b.cpu - a.cpu).slice(0, 10).map(p => ({ 
-            id: p.pid, name: p.name, type: 'PROCESS', usage: p.cpu 
-        }));
+        const [processes, titles] = await Promise.all([si.processes(), fetchWindowTitles()]);
+        const list = processes.list || [];
+        // Build a quick parent index so renderer processes (which never own a window)
+        // can borrow their parent's window title — answers "which msedge tab" when the
+        // top-CPU candidate is one of msedge's many renderer children.
+        const byPid = new Map(list.map(p => [p.pid, p]));
+        function resolveWindowTitle(pid, depth = 0) {
+            if (depth > 4) return undefined;
+            const own = titles.get(pid);
+            if (own) return own;
+            const proc = byPid.get(pid);
+            if (!proc || !proc.parentPid) return undefined;
+            return resolveWindowTitle(proc.parentPid, depth + 1);
+        }
+        // Combined node set: top 10 by CPU + every process that natively owns a window
+        // (the foreground-app set). Deduplicated, capped at 16. This way Drift sees the
+        // CPU hogs AND the apps he's actively interacting with.
+        const topCpu = [...list].sort((a, b) => b.cpu - a.cpu).slice(0, 10);
+        const windowed = list.filter(p => titles.has(p.pid));
+        const merged = new Map();
+        for (const p of [...topCpu, ...windowed]) {
+            if (!merged.has(p.pid)) merged.set(p.pid, p);
+        }
+        const nodes = Array.from(merged.values())
+            .sort((a, b) => b.cpu - a.cpu)
+            .slice(0, 16)
+            .map(p => {
+                const windowTitle = resolveWindowTitle(p.pid);
+                return {
+                    id: p.pid,
+                    name: p.name,
+                    type: 'PROCESS',
+                    usage: typeof p.cpu === 'number' ? p.cpu : 0,
+                    mem: typeof p.mem === 'number' ? p.mem : 0,
+                    parentPid: p.parentPid || 0,
+                    command: scrubPath(p.command || ''),
+                    params: scrubPath(String(p.params || '')).slice(0, 200),
+                    started: p.started || '',
+                    state: p.state || '',
+                    ...(windowTitle ? { windowTitle: scrubPath(windowTitle) } : {}),
+                };
+            });
         res.json(wrap({ nodes, total_threads: processes.all }, 'STABLE', 'PROCESS_GRAPH'));
     } catch (e) { res.status(500).json({ error: "Graph Fault" }); }
 });

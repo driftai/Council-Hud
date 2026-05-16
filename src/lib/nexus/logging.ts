@@ -76,7 +76,20 @@ export function summarizeNexusPayload(payload: unknown, maxLength = 100) {
     return `CPU ${formatPayloadValue(record.cpu_load)}% // RAM ${formatPayloadValue(record.ram_used)}% // TEMP ${formatPayloadValue(record.cpu_temp)}`;
   }
   if (Array.isArray(record.nodes) && "total_threads" in record) {
-    return `${record.nodes.length} processes // ${formatPayloadValue(record.total_threads)} threads`;
+    // Process-graph packets now ship richer per-node payloads (windowTitle, command,
+    // mem, parentPid). Surface the top hitter by CPU so the log entry says something
+    // specific instead of just a count — e.g. "12 procs · top msedge 47% (X — GitHub)".
+    const nodes = (record.nodes as Array<Record<string, unknown>>);
+    const top = [...nodes].sort((a, b) => Number(b.usage || 0) - Number(a.usage || 0))[0];
+    const procCount = nodes.length;
+    const totalThreads = formatPayloadValue(record.total_threads);
+    if (!top) return `${procCount} procs · ${totalThreads} threads`;
+    const topName = String(top.name || top.id || "?");
+    const topUsage = typeof top.usage === "number" ? `${top.usage.toFixed(1)}%` : "?";
+    const topTitle = typeof top.windowTitle === "string" && top.windowTitle
+      ? ` — ${truncate(top.windowTitle, 40)}`
+      : "";
+    return `${procCount} procs · top ${topName} ${topUsage}${topTitle} · ${totalThreads}thr`;
   }
   if (Array.isArray(record.tree)) {
     return `Mirror roots: ${record.tree.length} // ${formatPayloadValue(record.path)}`;

@@ -59,11 +59,11 @@ export const reportFileAdapter: SkillNexusAdapter = {
       return baseSnapshot(domain, "unreachable", "Source path is empty.");
     }
 
-    // For JSONL feeds, default to tail-mode if no explicit tailKB is set — these are append-only
-    // time-series files and reading the whole thing is wasteful.
+    // For JSONL + text logs, default to tail-mode if no explicit tailKB is set — these
+    // are append-only time-series files and reading the whole thing is wasteful.
     const effectiveTailKB = tailKB > 0
       ? tailKB
-      : (format === "jsonl" ? 512 : 0);
+      : (format === "jsonl" || format === "text" ? 512 : 0);
 
     let read:
       | Awaited<ReturnType<typeof safeReadText>>
@@ -89,6 +89,26 @@ export const reportFileAdapter: SkillNexusAdapter = {
           .map((line) => line.trim())
           .filter(Boolean)
           .map((line) => JSON.parse(line));
+      } else if (format === "text") {
+        // Plain-text log: each non-empty line becomes an entry. Parses [timestamp]
+        // message shape when present so downstream level inference + age display
+        // still work. Lets forge/pipeline logs plug into Skill Nexus directly.
+        entries = read.content
+          .split(/\r?\n/)
+          .map((line) => line.trim())
+          .filter(Boolean)
+          .map((line) => {
+            const m = line.match(/^\[(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2})\]\s*(.*)$/);
+            if (m) {
+              const ts = Date.parse(m[1].includes("T") ? m[1] : m[1].replace(" ", "T"));
+              return {
+                name: m[2].slice(0, 80),
+                timestamp: Number.isFinite(ts) ? Math.floor(ts / 1000) : 0,
+                message: m[2],
+              };
+            }
+            return { name: line.slice(0, 80), message: line, timestamp: 0 };
+          });
       } else {
         const parsed = JSON.parse(read.content);
         entries = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.entries) ? parsed.entries
@@ -104,7 +124,7 @@ export const reportFileAdapter: SkillNexusAdapter = {
     // For time-series JSONL (evolution history, judge outputs, etc.) the newest entries
     // are at the end. Slice the tail so the freshest 200 records are what surfaces.
     // domain.source.order can override this if a feed is ordered newest-first.
-    const order = String(domain.source?.order || (format === "jsonl" ? "newest-last" : "as-is"));
+    const order = String(domain.source?.order || (format === "jsonl" || format === "text" ? "newest-last" : "as-is"));
     const visible = order === "newest-last"
       ? entries.slice(-200).reverse()
       : entries.slice(0, 200);

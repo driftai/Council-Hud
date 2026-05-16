@@ -104,6 +104,17 @@
         }
       },
       {
+        "id": "skill-forge-pipeline",
+        "label": "Skill Forge Pipeline",
+        "type": "reportFile",
+        "enabled": false,
+        "source": {
+          "path": "/path/to/logs/skill-forge-pipeline.log",
+          "format": "text",
+          "tailKB": 256
+        }
+      },
+      {
         "id": "experiment-results",
         "label": "Judge Verdicts",
         "type": "experimentResults",

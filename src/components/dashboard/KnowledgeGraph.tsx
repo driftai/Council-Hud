@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState, type PointerEvent } from "react";
 import { DashboardCard } from "./DashboardCard";
-import { Activity, Cpu, Lock, RotateCcw, XCircle, ZoomIn, ZoomOut } from "lucide-react";
+import { Activity, Cpu, Lock, RotateCcw, Skull, X, ZoomIn, ZoomOut } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useNexus } from "@/providers/NexusProvider";
 import { Button } from "@/components/ui/button";
@@ -11,6 +11,15 @@ type ProcessNode = {
   id: number;
   name: string;
   usage: number;
+  // Enriched fields emitted by Council-Data-Router /graph since 2026-05-16.
+  // All optional so the HUD still works against older router builds.
+  mem?: number;
+  parentPid?: number;
+  command?: string;
+  params?: string;
+  started?: string;
+  state?: string;
+  windowTitle?: string;
 };
 
 type NodePoint = {
@@ -110,6 +119,14 @@ export function KnowledgeGraph() {
         id: toNumber(node.id),
         name: String(node.name ?? "unknown"),
         usage: toNumber(node.usage),
+        // Carry through enriched payload fields when the router supplies them.
+        ...(typeof node.mem === "number" ? { mem: node.mem } : {}),
+        ...(typeof node.parentPid === "number" ? { parentPid: node.parentPid } : {}),
+        ...(typeof node.command === "string" ? { command: node.command } : {}),
+        ...(typeof node.params === "string" ? { params: node.params } : {}),
+        ...(typeof node.started === "string" ? { started: node.started } : {}),
+        ...(typeof node.state === "string" ? { state: node.state } : {}),
+        ...(typeof node.windowTitle === "string" ? { windowTitle: node.windowTitle } : {}),
       }));
   }, [knowledgeGraph]);
   const totalThreads = toNumber(knowledgeGraph?.total_threads);
@@ -431,13 +448,29 @@ export function KnowledgeGraph() {
             >
               <div className="grid grid-cols-[1fr_auto] items-start gap-3">
                 <div className="min-w-0 font-mono">
-                  <div className="mb-1 flex items-center gap-2 text-[8px] uppercase tracking-widest text-muted-foreground">
+                  <div className="mb-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[8px] uppercase tracking-widest text-muted-foreground">
                     <span>PID {activeNode?.id ?? "--"}</span>
+                    {activeNode?.parentPid ? <span>PPID {activeNode.parentPid}</span> : null}
+                    {activeNode?.state ? <span>STATE {activeNode.state}</span> : null}
                     <span>THREADS {totalThreads || "--"}</span>
+                    {typeof activeNode?.mem === "number" && activeNode.mem > 0 ? <span>MEM {activeNode.mem.toFixed(1)}%</span> : null}
                   </div>
-                  <div className="truncate text-[11px] font-bold text-foreground">
-                    {activeNode?.name || "Awaiting process packet"}
+                  {/* Primary label: window title (when the process owns one — answers
+                      "which msedge tab" instead of generic "msedge"), falling back to
+                      the bare process name. */}
+                  <div className="truncate text-[11px] font-bold text-foreground" title={activeNode?.command || activeNode?.name}>
+                    {activeNode?.windowTitle || activeNode?.name || "Awaiting process packet"}
                   </div>
+                  {activeNode?.windowTitle && (
+                    <div className="truncate text-[9px] uppercase text-muted-foreground/70" title={activeNode.name}>
+                      via {activeNode.name}
+                    </div>
+                  )}
+                  {(activeNode?.command || activeNode?.params) && (
+                    <div className="mt-0.5 truncate text-[8px] text-muted-foreground/60" title={activeNode.command || ""}>
+                      <span className="opacity-50">cmd </span>{activeNode.command || activeNode.params}
+                    </div>
+                  )}
                   <div className="mt-2 h-1 overflow-hidden rounded-full bg-white/5">
                     <div
                       className={cn("h-full rounded-full", activeNode && loadBarColor(activeNode.usage))}
@@ -449,19 +482,39 @@ export function KnowledgeGraph() {
                   <span className={cn("font-mono text-sm font-bold", loadTextColor(activeNode?.usage ?? 0))}>
                     {activeNode ? `${activeNode.usage.toFixed(1)}%` : "--"}
                   </span>
+                  {/* Kill button — explicit destructive action with a Skull icon + native
+                      confirm so the X button (next to it) can be a clean "close panel". */}
                   <Button
                     type="button"
                     size="icon"
                     variant="ghost"
-                    title={canKillActive ? `Terminate ${activeNode?.name}` : "Protected process"}
-                    aria-label={canKillActive ? `Terminate ${activeNode?.name}` : "Protected process"}
+                    title={canKillActive ? `Terminate ${activeNode?.windowTitle || activeNode?.name}` : "Protected process"}
+                    aria-label={canKillActive ? `Terminate ${activeNode?.windowTitle || activeNode?.name}` : "Protected process"}
                     disabled={!canKillActive}
                     className="h-7 w-7 text-muted-foreground hover:bg-destructive/10 hover:text-destructive disabled:opacity-30"
                     onClick={() => {
-                      if (activeNode && canKillActive) void killProcess(activeNode.id);
+                      if (!activeNode || !canKillActive) return;
+                      const label = activeNode.windowTitle || activeNode.name;
+                      if (window.confirm(`Terminate "${label}" (PID ${activeNode.id})?`)) {
+                        void killProcess(activeNode.id);
+                      }
                     }}
                   >
-                    <XCircle className="h-4 w-4" />
+                    <Skull className="h-4 w-4" />
+                  </Button>
+                  {/* X button — clears the selection (closes the per-node detail view).
+                      Previously this slot held a kill action wired to XCircle, which made
+                      X look like a close button but actually terminated processes. */}
+                  <Button
+                    type="button"
+                    size="icon"
+                    variant="ghost"
+                    title="Close detail panel"
+                    aria-label="Close detail panel"
+                    className="h-7 w-7 text-muted-foreground hover:bg-white/5 hover:text-slate-100"
+                    onClick={() => setActiveId(null)}
+                  >
+                    <X className="h-4 w-4" />
                   </Button>
                 </div>
               </div>
