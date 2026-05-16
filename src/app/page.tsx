@@ -7,6 +7,7 @@ import { SmartFallback } from "@/components/dashboard/SmartFallback";
 import { SkillNexus } from "@/components/dashboard/SkillNexus";
 import { AutoResearch } from "@/components/dashboard/AutoResearch";
 import { AuditTrail } from "@/components/dashboard/AuditTrail";
+import { HarnessSource } from "@/components/dashboard/HarnessSource";
 import { NeuralVisualizer } from "@/components/dashboard/NeuralVisualizer";
 import { KnowledgeGraph } from "@/components/dashboard/KnowledgeGraph";
 import { FileWatcher } from "@/components/dashboard/FileWatcher";
@@ -895,6 +896,9 @@ export default function Home() {
             <SmartFallback />
             <AutoResearch />
             <AuditTrail />
+            <div className="xl:col-span-2">
+              <HarnessSource />
+            </div>
             <div className="xl:col-span-2">
               <CouncilComms />
             </div>

@@ -80,8 +80,36 @@ function formatMessageTime(timestamp: string) {
 type AgentIdentity = {
   defaultSender: string;
   defaultDmTarget: string;
-  agents: Record<string, { role: string; mode: "operator" | "live" | "viewer" | "bridge" }>;
+  agents: Record<string, { role: string; mode: "operator" | "live" | "viewer" | "bridge"; sessionUrl?: string }>;
+  agentBridges: Record<string, string>;
 };
+
+// Parse `@<name>` mentions from a message. Returns:
+//   - `null` if no mention → use existing scope/target
+//   - `{ broadcast: true }` if `@all` / `@allAgents` / `@everyone` (case-insensitive)
+//   - `{ broadcast: false, agent: name, bridge: target }` for `@<agent>`
+//
+// The mention has to be at the start of the message (after optional whitespace) to count
+// as a routing override — `@` mid-sentence is just a mention, not a redirect.
+type MentionRoute =
+  | null
+  | { broadcast: true }
+  | { broadcast: false; agent: string; bridge: string };
+
+function parseMention(content: string, identity: AgentIdentity | null): MentionRoute {
+  if (!identity) return null;
+  const match = content.trimStart().match(/^@([A-Za-z][A-Za-z0-9_-]{1,30})\b/);
+  if (!match) return null;
+  const raw = match[1].toLowerCase();
+  if (raw === "all" || raw === "allagents" || raw === "everyone") {
+    return { broadcast: true };
+  }
+  const agents = identity.agents || {};
+  const matchedAgent = Object.keys(agents).find((name) => name.toLowerCase() === raw);
+  if (!matchedAgent) return null;
+  const bridge = identity.agentBridges?.[matchedAgent] || matchedAgent + "-bridge";
+  return { broadcast: false, agent: matchedAgent, bridge };
+}
 
 const MODE_COLOR_CLASS: Record<string, string> = {
   operator: "text-primary",
@@ -368,13 +396,25 @@ export function CouncilComms() {
   };
 
   const postCouncilMessage = async (content: string, messageKind = kind) => {
+    // @mention routing override: `@<agent>` at the start of the message forces a DM to
+    // that agent's bridge (bypassing topic delegation). `@all` / `@allAgents` /
+    // `@everyone` forces a broadcast to the council topic, hitting every agent that
+    // listens on it. The mention text itself is left in the content so receivers see who
+    // was addressed.
+    const mention = parseMention(content, identity);
+    const effectiveScope: Scope = mention?.broadcast ? "topic"
+      : mention ? "dm"
+      : scope;
+    const effectiveTarget = mention && !mention.broadcast ? mention.bridge : target;
+    const effectiveTopic = mention?.broadcast ? "council" : (scope === "topic" ? cleanTopicName(topic) : "");
+
     const outgoing: CouncilMessage = {
       id: `pending-${Date.now()}-${Math.random().toString(16).slice(2)}`,
       timestamp: new Date().toISOString(),
       sender: sessionName,
-      to: scope === "dm" ? target : "*",
+      to: effectiveScope === "dm" ? effectiveTarget : "*",
       content,
-      topic: scope === "topic" ? cleanTopicName(topic) : "",
+      topic: effectiveScope === "topic" ? effectiveTopic : "",
       kind: messageKind,
       priority: false,
       pending: true,
@@ -386,9 +426,9 @@ export function CouncilComms() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         from: sessionName,
-        to: target,
-        topic: cleanTopicName(topic),
-        scope,
+        to: effectiveTarget,
+        topic: effectiveTopic,
+        scope: effectiveScope,
         kind: messageKind,
         content,
       }),
@@ -561,6 +601,30 @@ export function CouncilComms() {
           ))}
         </div>
 
+        {/* Native session shortcuts — opens each agent's main session in its native web
+            UI (openclaw control on 18789 by default). Only agents with a configured
+            sessionUrl in council.config.local.json get a chip; if none are configured
+            the row collapses to nothing. */}
+        {identity && Object.entries(identity.agents).some(([, p]) => p.sessionUrl) && (
+          <div className="flex flex-wrap items-center gap-1 rounded border border-white/10 bg-black/20 p-1">
+            <span className="px-1 font-mono text-[8px] uppercase text-muted-foreground/70">Open session</span>
+            {Object.entries(identity.agents)
+              .filter(([, p]) => Boolean(p.sessionUrl))
+              .map(([name, profile]) => (
+                <a
+                  key={name}
+                  href={profile.sessionUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="rounded border border-white/10 bg-white/[0.02] px-1.5 py-0.5 font-mono text-[9px] uppercase text-slate-200 transition-colors hover:border-primary/40 hover:bg-primary/10 hover:text-primary"
+                  title={`Open ${name} session in ${profile.role} web UI`}
+                >
+                  {name}
+                </a>
+              ))}
+          </div>
+        )}
+
         <div className="grid grid-cols-2 gap-2">
           {scope === "topic" ? (
             <input
@@ -715,11 +779,23 @@ export function CouncilComms() {
           </div>
         </ScrollArea>
 
+        {(() => {
+          const mention = parseMention(draft, identity);
+          if (!mention) return null;
+          return (
+            <div className="rounded border border-primary/30 bg-primary/5 px-2 py-1 font-mono text-[9px] uppercase text-primary">
+              ↳ @mention override → {mention.broadcast
+                ? "broadcast to #council (every listening agent)"
+                : `DM ${mention.agent} via ${mention.bridge}`}
+            </div>
+          );
+        })()}
+
         <form onSubmit={handleSend} className="flex gap-2">
           <Textarea
             value={draft}
             onChange={(event) => setDraft(event.target.value)}
-            placeholder={scope === "dm" ? `DM ${target}...` : scope === "broadcast" ? "Broadcast..." : `Send to #${cleanTopicName(topic)}...`}
+            placeholder={scope === "dm" ? `DM ${target}... (or @<agent> / @all)` : scope === "broadcast" ? "Broadcast... (or @<agent> to DM)" : `Send to #${cleanTopicName(topic)}... (or @<agent> / @all)`}
             className="min-h-16 resize-none border-white/10 bg-black/40 font-mono text-xs text-slate-100 focus-visible:ring-primary"
           />
           <div className="flex w-11 shrink-0 flex-col gap-2">

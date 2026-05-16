@@ -15,6 +15,10 @@ export type AgentMode = "operator" | "live" | "viewer" | "bridge";
 export type AgentProfile = {
   role: string;
   mode: AgentMode;
+  // Optional URL to the agent's main session in its native web UI (openclaw control on
+  // 18789, hermes web, etc.). Surfaced as a "open session" shortcut in the Council Comms
+  // card. Lives only in council.config.local.json — example uses generic placeholders.
+  sessionUrl?: string;
 };
 
 export type BridgeTarget = {
@@ -209,12 +213,35 @@ export type PublicCouncilIdentity = {
   defaultSender: string;
   defaultDmTarget: string;
   agents: Record<string, AgentProfile>;
+  // Map of agent-name -> bridge target so the @mention router can resolve
+  // `@eve` -> the configured DM target without leaking the bridges array shape.
+  agentBridges: Record<string, string>;
 };
 
 export function publicCouncilIdentity(config = loadCouncilConfig()): PublicCouncilIdentity {
+  const agentBridges: Record<string, string> = {};
+  // Explicit bridge launcher wins. Falls back to the fallbackScript name minus the .py
+  // suffix when launcher is null (some bridges only have a Python wrapper). Live agents
+  // with neither still get a sensible default in parseMention via `<agent>-bridge`.
+  for (const bridge of config.council.bridges) {
+    if (!bridge.agent) continue;
+    if (bridge.launcher) {
+      agentBridges[bridge.agent] = bridge.launcher;
+    } else if (bridge.fallbackScript) {
+      agentBridges[bridge.agent] = bridge.fallbackScript.replace(/\.py$/, "");
+    }
+  }
+  // Last resort: every live agent gets a default target name so `@<agent>` mentions
+  // always resolve to something (the hub may or may not actually route it).
+  for (const [name, profile] of Object.entries(config.council.agents)) {
+    if (!agentBridges[name] && profile.mode === "live") {
+      agentBridges[name] = `${name}-bridge`;
+    }
+  }
   return {
     defaultSender: config.council.defaultSender,
     defaultDmTarget: config.council.defaultDmTarget,
     agents: config.council.agents,
+    agentBridges,
   };
 }
