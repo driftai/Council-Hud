@@ -5,6 +5,8 @@ import { AgentRoster } from "@/components/dashboard/AgentRoster";
 import { CouncilComms } from "@/components/dashboard/CouncilComms";
 import { SmartFallback } from "@/components/dashboard/SmartFallback";
 import { SkillNexus } from "@/components/dashboard/SkillNexus";
+import { AutoResearch } from "@/components/dashboard/AutoResearch";
+import { AuditTrail } from "@/components/dashboard/AuditTrail";
 import { NeuralVisualizer } from "@/components/dashboard/NeuralVisualizer";
 import { KnowledgeGraph } from "@/components/dashboard/KnowledgeGraph";
 import { FileWatcher } from "@/components/dashboard/FileWatcher";
@@ -891,6 +893,8 @@ export default function Home() {
           <div className="lg:col-span-3 xl:col-span-4 2xl:col-span-4 space-y-6 xl:grid xl:grid-cols-2 xl:gap-6 xl:space-y-0 xl:items-start">
             <AgentRoster />
             <SmartFallback />
+            <AutoResearch />
+            <AuditTrail />
             <div className="xl:col-span-2">
               <CouncilComms />
             </div>
