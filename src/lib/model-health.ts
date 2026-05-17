@@ -131,10 +131,18 @@ async function loadHealth(path: string): Promise<Map<string, number>> {
 // engine keys its DECOMMISSIONED list by the bare model id (e.g. "minimaxai/
 // minimax-m2.5"), so we extract candidate ids by stripping known provider
 // prefixes and checking the tail.
+// Smart Fallback prefixes the provider tier onto every model ref it emits, e.g.
+// "nvidia/qwen/qwen3.5-397b-a17b" or "openrouter/stepfun/step-3.5-flash:free".
+// The health map is keyed by the bare model_id (no provider), so strip these
+// prefixes when looking up scores. Keep this list in sync with the provider
+// names declared in ~/.openclaw/openclaw.json:models.providers.
 const PROVIDER_PREFIXES = [
   "nvidia-all-stars/",
   "nvidia-speedsters/",
+  "nvidia-reliables/",
+  "nvidia-problematic-Experimental-Heavy-Quota-Rated/",
   "nvidia-paid/",
+  "nvidia/",        // plain "nvidia" tier — must come AFTER more-specific nvidia-* prefixes
   "openrouter/",
   "google/",
   "free-project/",
