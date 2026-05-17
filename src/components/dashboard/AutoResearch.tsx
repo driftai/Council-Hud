@@ -35,6 +35,19 @@ type Snapshot = {
   source: string;
 };
 
+// Format a kept-rate fraction without losing signal for extreme cases. Genetic
+// algorithms running long enough to accumulate 50k+ trials routinely sit at
+// rates like 0.00013 — rounding to "0.0%" buries the actual success rate, so
+// the formatter scales precision dynamically.
+function formatKeptRate(rate: number): string {
+  if (!Number.isFinite(rate) || rate <= 0) return "0%";
+  const pct = rate * 100;
+  if (pct >= 10) return `${pct.toFixed(0)}%`;
+  if (pct >= 1) return `${pct.toFixed(1)}%`;
+  if (pct >= 0.01) return `${pct.toFixed(2)}%`;
+  return `${pct.toFixed(3)}%`;
+}
+
 function formatAge(epochSeconds: number) {
   if (!epochSeconds || epochSeconds <= 0) return "never";
   const delta = Date.now() / 1000 - epochSeconds;
@@ -210,23 +223,49 @@ export function AutoResearch() {
           </div>
         )}
 
+        {/* === Top stat strip — primary metrics. Baseline is collapsed into a
+             Δ tile (raw baseline = best when nothing has displaced the incumbent,
+             so the standalone tile was redundant). Kept gets a readable
+             count+percent format ("7 · 0.01%") instead of the cryptic "7/53484".
+             Layout is Best · Δ vs baseline · Trials · Kept. === */}
         <div className="grid grid-cols-4 gap-2 font-mono text-[9px] uppercase">
-          <div className="rounded border border-white/10 bg-black/20 px-2 py-1.5">
-            <div className="text-muted-foreground">Baseline</div>
-            <p className="mt-0.5 text-sm font-bold text-foreground">{snap ? snap.baselineScore.toFixed(3) : "--"}</p>
-          </div>
-          <div className="rounded border border-secondary/30 bg-secondary/5 px-2 py-1.5">
+          <div className="rounded border border-secondary/30 bg-secondary/5 px-2 py-1.5" title="Best composite fitness recorded so far">
             <div className="text-secondary">Best</div>
             <p className="mt-0.5 text-sm font-bold text-secondary">{snap ? snap.bestScore.toFixed(3) : "--"}</p>
           </div>
-          <div className="rounded border border-primary/30 bg-primary/5 px-2 py-1.5">
+          {(() => {
+            const delta = snap ? snap.bestScore - snap.baselineScore : 0;
+            const pct = snap && snap.baselineScore > 0 ? (delta / snap.baselineScore) * 100 : 0;
+            const stable = !snap || Math.abs(delta) < 0.0005;
+            const tone = stable
+              ? "border-white/10 text-muted-foreground"
+              : delta > 0
+              ? "border-secondary/30 text-secondary"
+              : "border-destructive/30 text-destructive";
+            return (
+              <div
+                className={cn("rounded border bg-black/20 px-2 py-1.5", tone)}
+                title={stable
+                  ? `Best equals baseline (${snap?.baselineScore.toFixed(3) ?? "--"}) — incumbent genome dominates`
+                  : `Improvement of ${delta.toFixed(3)} over baseline ${snap?.baselineScore.toFixed(3)}`}
+              >
+                <div className="opacity-80">Δ vs base</div>
+                <p className="mt-0.5 text-sm font-bold">
+                  {stable ? "stable" : `${delta > 0 ? "+" : ""}${pct.toFixed(2)}%`}
+                </p>
+              </div>
+            );
+          })()}
+          <div className="rounded border border-primary/30 bg-primary/5 px-2 py-1.5" title="Total experiments run since the loop started">
             <div className="text-primary">Trials</div>
-            <p className="mt-0.5 text-sm font-bold text-primary">{snap?.totalExperiments ?? "--"}</p>
+            <p className="mt-0.5 text-sm font-bold text-primary">{snap ? snap.totalExperiments.toLocaleString() : "--"}</p>
           </div>
-          <div className="rounded border border-yellow-500/30 bg-yellow-500/5 px-2 py-1.5">
+          <div className="rounded border border-yellow-500/30 bg-yellow-500/5 px-2 py-1.5" title="Trials whose composite score beat the kept-bar (the loop's success rate)">
             <div className="text-yellow-400">Kept</div>
             <p className="mt-0.5 text-sm font-bold text-yellow-400">
-              {snap ? `${snap.kept}/${snap.totalExperiments}` : "--"}
+              {snap
+                ? `${snap.kept} · ${formatKeptRate(snap.keptRate)}`
+                : "--"}
             </p>
           </div>
         </div>
@@ -254,9 +293,20 @@ export function AutoResearch() {
             <div className="text-muted-foreground">Magnitude</div>
             <p className="mt-0.5 text-xs font-bold text-foreground">{snap ? snap.currentMagnitude.toFixed(2) : "--"}</p>
           </div>
-          <div className="rounded border border-white/10 bg-black/20 px-2 py-1.5" title="Fraction of trials that improved the composite enough to be kept">
-            <div className="text-muted-foreground">Kept rate</div>
-            <p className="mt-0.5 text-xs font-bold text-foreground">{snap ? `${(snap.keptRate * 100).toFixed(1)}%` : "--"}</p>
+          {/* "Trials per keep" replaces the old Kept rate tile (which the top
+              row's `Kept` already expresses as a percent). Inverted form — "1 per
+              N trials" — is more intuitive for sparse-success regimes: a loop
+              keeping 7 of 53,484 trials shows as "1 per 7,640" which conveys
+              the difficulty far better than "0.0%". */}
+          <div className="rounded border border-white/10 bg-black/20 px-2 py-1.5" title="On average, how many trials run between two kept genomes">
+            <div className="text-muted-foreground">Trials/keep</div>
+            <p className="mt-0.5 text-xs font-bold text-foreground">
+              {snap && snap.kept > 0
+                ? `1 per ${Math.round(snap.totalExperiments / snap.kept).toLocaleString()}`
+                : snap
+                ? "—"
+                : "--"}
+            </p>
           </div>
           <div className="rounded border border-white/10 bg-black/20 px-2 py-1.5" title="Number of process restarts the loop has logged">
             <div className="text-muted-foreground">Restarts</div>
