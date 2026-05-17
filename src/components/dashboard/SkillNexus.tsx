@@ -7,6 +7,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { cn } from "@/lib/utils";
 import {
   AlertCircle,
+  ArrowDownNarrowWide,
   Award,
   BarChart3,
   BookOpen,
@@ -152,6 +153,10 @@ export function SkillNexus() {
   const [activeTab, setActiveTab] = useState<string>("overview");
   const [statusFilter, setStatusFilter] = useState<"all" | "problems">("all");
   const [expanded, setExpanded] = useState(false);
+  // Global sort toggle. "default" = adapter-emitted order (alphabetical or as-fetched).
+  // "recent" = mtime descending, freshest items first. Applies to DomainPanel + Issues
+  // feed so the user can flip context between "browse the library" and "what changed".
+  const [sortMode, setSortMode] = useState<"default" | "recent">("default");
 
   const refresh = useCallback(async (silent = false) => {
     if (!silent) setLoading(true);
@@ -235,6 +240,21 @@ export function SkillNexus() {
                 {totals?.healthyDomains ?? 0}/{totals?.enabledDomains ?? 0} healthy
               </span>
             )}
+            <button
+              type="button"
+              onClick={() => setSortMode((m) => (m === "recent" ? "default" : "recent"))}
+              className={cn(
+                "flex h-7 items-center gap-1 rounded border px-2 font-mono text-[9px] uppercase transition-colors",
+                sortMode === "recent"
+                  ? "border-primary/40 bg-primary/10 text-primary"
+                  : "border-white/10 bg-transparent text-muted-foreground hover:border-primary/30 hover:text-primary"
+              )}
+              title={sortMode === "recent" ? "Sorting newest first — click to restore default order" : "Sort everything by most-recent activity"}
+              aria-pressed={sortMode === "recent"}
+            >
+              <ArrowDownNarrowWide className="h-3 w-3" />
+              <span>{sortMode === "recent" ? "Recent" : "Sort"}</span>
+            </button>
             <Button
               type="button"
               variant="outline"
@@ -321,7 +341,7 @@ export function SkillNexus() {
               <InsightsPanel report={report} expanded={expanded} />
             )}
             {activeTab === "issues" && (
-              <IssuesPanel report={report} warnings={allWarnings} onJumpToDomain={setActiveTab} />
+              <IssuesPanel report={report} warnings={allWarnings} onJumpToDomain={setActiveTab} sortMode={sortMode} />
             )}
             {activeTab === "info" && (
               <InfoPanel report={report} expanded={expanded} />
@@ -332,6 +352,7 @@ export function SkillNexus() {
                 statusFilter={statusFilter}
                 onStatusFilter={setStatusFilter}
                 expanded={expanded}
+                sortMode={sortMode}
               />
             )}
           </div>
@@ -514,10 +535,12 @@ function IssuesPanel({
   report,
   warnings,
   onJumpToDomain,
+  sortMode,
 }: {
   report: SkillNexusReport | null;
   warnings: Array<{ domainId: string; domainLabel: string; warning: string }>;
   onJumpToDomain: (id: string) => void;
+  sortMode: "default" | "recent";
 }) {
   const [copied, setCopied] = useState(false);
 
@@ -536,14 +559,19 @@ function IssuesPanel({
         }
       }
     }
-    // Surface judge-failed experiments at the top — they're often the most actionable.
-    out.sort((a, b) => {
-      const aJudge = a.domain.id === "experiment-results" || a.domain.id === "evolution-history" ? 0 : 1;
-      const bJudge = b.domain.id === "experiment-results" || b.domain.id === "evolution-history" ? 0 : 1;
-      return aJudge - bJudge;
-    });
+    if (sortMode === "recent") {
+      // User asked for "newest first" — date sort wins over the judge-prioritization heuristic.
+      out.sort((a, b) => (b.item.mtime || 0) - (a.item.mtime || 0));
+    } else {
+      // Default: surface judge-failed experiments at the top — they're often the most actionable.
+      out.sort((a, b) => {
+        const aJudge = a.domain.id === "experiment-results" || a.domain.id === "evolution-history" ? 0 : 1;
+        const bJudge = b.domain.id === "experiment-results" || b.domain.id === "evolution-history" ? 0 : 1;
+        return aJudge - bJudge;
+      });
+    }
     return out;
-  }, [report]);
+  }, [report, sortMode]);
 
   const copyAll = useCallback(async () => {
     const lines: string[] = [];
@@ -661,18 +689,24 @@ function DomainPanel({
   statusFilter,
   onStatusFilter,
   expanded,
+  sortMode,
 }: {
   domain: DomainSnapshot;
   statusFilter: "all" | "problems";
   onStatusFilter: (value: "all" | "problems") => void;
   expanded: boolean;
+  sortMode: "default" | "recent";
 }) {
   const visible = useMemo(() => {
-    if (statusFilter === "problems") {
-      return domain.items.filter((item) => item.status && item.status !== "ok");
+    let items = statusFilter === "problems"
+      ? domain.items.filter((item) => item.status && item.status !== "ok")
+      : domain.items;
+    if (sortMode === "recent") {
+      // Items without mtime sort to the bottom — preserves the adapter's tiebreaker.
+      items = items.slice().sort((a, b) => (b.mtime || 0) - (a.mtime || 0));
     }
-    return domain.items;
-  }, [domain.items, statusFilter]);
+    return items;
+  }, [domain.items, statusFilter, sortMode]);
 
   return (
     <div className="space-y-2">

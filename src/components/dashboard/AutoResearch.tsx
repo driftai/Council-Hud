@@ -5,7 +5,7 @@ import { DashboardCard } from "./DashboardCard";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { cn } from "@/lib/utils";
-import { AlertCircle, Dna, FlaskConical, RefreshCcw, TrendingUp } from "lucide-react";
+import { AlertCircle, BarChartHorizontal, ChevronDown, ChevronUp, Dna, FlaskConical, RefreshCcw, Target, TrendingUp } from "lucide-react";
 
 type Trial = {
   experiment: number;
@@ -62,10 +62,54 @@ function Sparkline({ values, width = 110, height = 24 }: { values: number[]; wid
   );
 }
 
+// Build a score-distribution histogram from a trial list. Five bins covering the
+// useful range (<0.6 through >=0.9) reveal at a glance how tightly the recent
+// trials cluster around the best score — the canonical convergence signal in
+// genetic-algorithm dashboards (MATLAB's `gaplotscorediversity` does the same).
+type DistBin = { label: string; min: number; max: number; count: number; isBestBand: boolean };
+function buildScoreDistribution(trials: Trial[], bestScore: number): DistBin[] {
+  const bins: DistBin[] = [
+    { label: "<0.60", min: -Infinity, max: 0.6, count: 0, isBestBand: false },
+    { label: "0.60–0.70", min: 0.6, max: 0.7, count: 0, isBestBand: false },
+    { label: "0.70–0.80", min: 0.7, max: 0.8, count: 0, isBestBand: false },
+    { label: "0.80–0.90", min: 0.8, max: 0.9, count: 0, isBestBand: false },
+    { label: "≥0.90", min: 0.9, max: Infinity, count: 0, isBestBand: false },
+  ];
+  for (const t of trials) {
+    const bin = bins.find((b) => t.score >= b.min && t.score < b.max);
+    if (bin) bin.count += 1;
+  }
+  for (const bin of bins) {
+    bin.isBestBand = bestScore >= bin.min && bestScore < bin.max;
+  }
+  return bins;
+}
+
+// Surface the trials whose score came closest to the current best — these are
+// the experiments worth investigating next. A regressed trial that landed at
+// 0.825 is more informative than 28 others that landed at 0.76.
+function findNearMisses(trials: Trial[], limit = 3): Trial[] {
+  return trials.slice().sort((a, b) => b.score - a.score).slice(0, limit);
+}
+
+function summarizeMutations(trials: Trial[]): { min: number; max: number; median: number } | null {
+  if (trials.length === 0) return null;
+  const muts = trials.map((t) => t.mutations).sort((a, b) => a - b);
+  return {
+    min: muts[0],
+    max: muts[muts.length - 1],
+    median: muts[Math.floor(muts.length / 2)],
+  };
+}
+
 export function AutoResearch() {
   const [snap, setSnap] = useState<Snapshot | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Collapsed by default — the distribution + near-misses summary is enough for
+  // the routine glance. Operators can expand to the full per-trial list when
+  // forensics are needed (e.g. "what mutated on exp 53458 that scored 0.825?").
+  const [showAllTrials, setShowAllTrials] = useState(false);
 
   const refresh = useCallback(async (silent = false) => {
     if (!silent) setLoading(true);
@@ -95,6 +139,26 @@ export function AutoResearch() {
   const trend = snap?.trend ?? [];
   const lastTrend = trend.length > 0 ? trend[trend.length - 1] : 0;
   const trendDelta = trend.length >= 2 ? lastTrend - trend[0] : 0;
+
+  const trials = snap?.recentTrials ?? [];
+  const trialsCount = trials.length;
+  const regressed = useMemo(() => trials.filter((t) => t.improvement < 0).length, [trials]);
+  const kept = useMemo(() => trials.filter((t) => t.kept).length, [trials]);
+  const neutral = trialsCount - regressed - kept;
+  const distribution = useMemo(
+    () => buildScoreDistribution(trials, snap?.bestScore ?? 0),
+    [trials, snap?.bestScore]
+  );
+  const distributionMax = distribution.reduce((acc, b) => Math.max(acc, b.count), 0) || 1;
+  const nearMisses = useMemo(() => findNearMisses(trials, 3), [trials]);
+  const mutationSummary = useMemo(() => summarizeMutations(trials), [trials]);
+  // Convergence label — high regression % AND tight clustering means the loop has
+  // found a local optimum and needs a bigger mutation magnitude or a strategy
+  // shift. The dashboard surfaces this directly instead of making operators
+  // count regress rows.
+  const regressionRate = trialsCount > 0 ? regressed / trialsCount : 0;
+  const convergence: "high" | "moderate" | "active" =
+    regressionRate >= 0.95 ? "high" : regressionRate >= 0.7 ? "moderate" : "active";
 
   // Genome highlights — show the most operationally interesting fields first.
   const PRIORITY_KEYS = [
@@ -217,44 +281,157 @@ export function AutoResearch() {
           </div>
         </div>
 
-        <div className="rounded border border-white/10 bg-black/30 p-2">
-          <div className="mb-1 flex items-center gap-1 font-mono text-[9px] uppercase text-muted-foreground">
-            <FlaskConical className="h-3 w-3 text-primary" />
-            <span>Recent trials (newest first)</span>
-          </div>
-          <ScrollArea className="h-[160px]">
-            <div className="space-y-0.5">
-              {snap?.recentTrials.length ? snap.recentTrials.map((t) => (
-                <div
-                  key={t.id || `${t.experiment}`}
-                  className={cn(
-                    "flex items-center gap-2 rounded border px-2 py-0.5 font-mono text-[9px]",
-                    t.kept ? "border-secondary/30 bg-secondary/5" : "border-white/10 bg-white/[0.02]"
-                  )}
-                >
-                  <span className="shrink-0 text-muted-foreground/60">#{t.experiment}</span>
-                  <span className={cn("shrink-0 rounded border px-1 text-[8px] uppercase",
-                    t.kept ? "border-secondary/40 text-secondary"
-                    : t.improvement < 0 ? "border-destructive/40 text-destructive/80"
-                    : "border-white/10 text-muted-foreground"
-                  )}>
-                    {t.kept ? "kept" : t.improvement < 0 ? "regress" : "neutral"}
-                  </span>
-                  <span className="flex-1 truncate text-foreground/80">
-                    score {t.score.toFixed(3)}
-                    <span className={cn("ml-1 text-[8px]",
-                      t.improvement > 0 ? "text-secondary/80" : t.improvement < 0 ? "text-destructive/80" : "text-muted-foreground/60")}>
-                      ({t.improvement > 0 ? "+" : ""}{t.improvement.toFixed(3)})
-                    </span>
-                  </span>
-                  <span className="shrink-0 text-[8px] uppercase text-muted-foreground/60">{t.mutations}mut</span>
-                </div>
-              )) : (
-                <p className="font-mono text-[10px] text-muted-foreground/70">No recent trial data yet.</p>
-              )}
+        {/* === Recent-window summary === */}
+        {trialsCount > 0 && (
+          <div className="rounded border border-white/10 bg-black/30 p-2">
+            <div className="mb-1.5 flex items-center justify-between gap-1 font-mono text-[9px] uppercase text-muted-foreground">
+              <div className="flex items-center gap-1">
+                <BarChartHorizontal className="h-3 w-3 text-primary" />
+                <span>Recent {trialsCount} trials · </span>
+                <span className="text-foreground/80">{regressed} regress</span>
+                {kept > 0 && <span className="text-secondary">· {kept} kept</span>}
+                {neutral > 0 && <span className="text-muted-foreground">· {neutral} neutral</span>}
+              </div>
+              <span
+                className={cn(
+                  "rounded border px-1.5 py-px text-[8px]",
+                  convergence === "high"
+                    ? "border-yellow-500/40 text-yellow-300"
+                    : convergence === "moderate"
+                    ? "border-primary/40 text-primary"
+                    : "border-secondary/40 text-secondary"
+                )}
+                title={
+                  convergence === "high"
+                    ? "Near-total regression — loop has found a local optimum. Bigger magnitude or strategy shift may unlock new ground."
+                    : convergence === "moderate"
+                    ? "Most trials regress, but the trial space is still varied enough to keep searching."
+                    : "Plenty of improvements still landing — exploration is active."
+                }
+              >
+                convergence: {convergence}
+              </span>
             </div>
-          </ScrollArea>
-        </div>
+
+            {/* Score-bin histogram. The best-score band gets a primary tint so
+                operators can read "where do trials fall relative to the bar?" at a glance. */}
+            <div className="space-y-0.5">
+              {distribution.map((bin) => (
+                <div key={bin.label} className="flex items-center gap-1.5 font-mono text-[8px]">
+                  <span className={cn("w-16 shrink-0", bin.isBestBand ? "text-primary" : "text-muted-foreground/80")}>
+                    {bin.label}
+                  </span>
+                  <div className="relative h-2 flex-1 overflow-hidden rounded bg-white/5">
+                    <div
+                      className={cn(
+                        "h-full",
+                        bin.isBestBand ? "bg-primary/60" : bin.count === 0 ? "bg-transparent" : "bg-secondary/40"
+                      )}
+                      style={{ width: `${(bin.count / distributionMax) * 100}%` }}
+                    />
+                  </div>
+                  <span className={cn("w-6 shrink-0 text-right", bin.count === 0 ? "text-muted-foreground/40" : "text-foreground/80")}>
+                    {bin.count}
+                  </span>
+                </div>
+              ))}
+            </div>
+
+            {mutationSummary && (
+              <div className="mt-1.5 flex items-center justify-between font-mono text-[8px] uppercase text-muted-foreground/80">
+                <span>mutations · min {mutationSummary.min} · median {mutationSummary.median} · max {mutationSummary.max}</span>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* === Near-misses (top 3 of the recent window) === */}
+        {nearMisses.length > 0 && (
+          <div className="rounded border border-white/10 bg-black/30 p-2">
+            <div className="mb-1 flex items-center gap-1 font-mono text-[9px] uppercase text-muted-foreground">
+              <Target className="h-3 w-3 text-primary" />
+              <span>Closest to best ({snap?.bestScore.toFixed(3) ?? "--"})</span>
+            </div>
+            <div className="space-y-0.5">
+              {nearMisses.map((t) => {
+                const gap = (snap?.bestScore ?? 0) - t.score;
+                return (
+                  <div
+                    key={t.id || `${t.experiment}`}
+                    className={cn(
+                      "flex items-center gap-2 rounded border px-2 py-0.5 font-mono text-[9px]",
+                      t.kept ? "border-secondary/30 bg-secondary/5" : "border-white/10 bg-white/[0.02]"
+                    )}
+                  >
+                    <span className="shrink-0 text-muted-foreground/60">#{t.experiment}</span>
+                    <span className="flex-1 truncate text-foreground/80">
+                      {t.score.toFixed(3)}
+                      <span className="ml-1 text-[8px] text-muted-foreground/70">
+                        ({gap >= 0 ? "−" : "+"}{Math.abs(gap).toFixed(3)} from best)
+                      </span>
+                    </span>
+                    <span className="shrink-0 text-[8px] uppercase text-muted-foreground/60">{t.mutations}mut</span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* === Full trial list (collapsible — keeps the per-trial detail accessible) === */}
+        {trialsCount > 0 && (
+          <div className="rounded border border-white/10 bg-black/30 p-2">
+            <button
+              type="button"
+              onClick={() => setShowAllTrials((v) => !v)}
+              className="flex w-full items-center justify-between gap-1 font-mono text-[9px] uppercase text-muted-foreground hover:text-foreground"
+              aria-expanded={showAllTrials}
+            >
+              <div className="flex items-center gap-1">
+                <FlaskConical className="h-3 w-3 text-primary" />
+                <span>{showAllTrials ? "Hide" : "Show"} all {trialsCount} trials</span>
+              </div>
+              {showAllTrials ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
+            </button>
+            {showAllTrials && (
+              <ScrollArea className="mt-1.5 h-[160px]">
+                <div className="space-y-0.5">
+                  {trials.map((t) => (
+                    <div
+                      key={t.id || `${t.experiment}`}
+                      className={cn(
+                        "flex items-center gap-2 rounded border px-2 py-0.5 font-mono text-[9px]",
+                        t.kept ? "border-secondary/30 bg-secondary/5" : "border-white/10 bg-white/[0.02]"
+                      )}
+                    >
+                      <span className="shrink-0 text-muted-foreground/60">#{t.experiment}</span>
+                      <span className={cn("shrink-0 rounded border px-1 text-[8px] uppercase",
+                        t.kept ? "border-secondary/40 text-secondary"
+                        : t.improvement < 0 ? "border-destructive/40 text-destructive/80"
+                        : "border-white/10 text-muted-foreground"
+                      )}>
+                        {t.kept ? "kept" : t.improvement < 0 ? "regress" : "neutral"}
+                      </span>
+                      <span className="flex-1 truncate text-foreground/80">
+                        score {t.score.toFixed(3)}
+                        <span className={cn("ml-1 text-[8px]",
+                          t.improvement > 0 ? "text-secondary/80" : t.improvement < 0 ? "text-destructive/80" : "text-muted-foreground/60")}>
+                          ({t.improvement > 0 ? "+" : ""}{t.improvement.toFixed(3)})
+                        </span>
+                      </span>
+                      <span className="shrink-0 text-[8px] uppercase text-muted-foreground/60">{t.mutations}mut</span>
+                    </div>
+                  ))}
+                </div>
+              </ScrollArea>
+            )}
+          </div>
+        )}
+        {trialsCount === 0 && (
+          <div className="rounded border border-white/10 bg-black/30 p-2 font-mono text-[10px] text-muted-foreground/70">
+            No recent trial data yet.
+          </div>
+        )}
 
         <div className="flex items-center justify-between font-mono text-[8px] uppercase text-muted-foreground">
           <span>last trial {formatAge(snap?.lastExperimentAt ?? 0)}</span>
