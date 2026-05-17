@@ -6,6 +6,12 @@ import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { cn } from "@/lib/utils";
 import {
+  deriveBottlenecks,
+  deriveHeartbeats,
+  deriveSaturation,
+  formatAge as formatAgeMs,
+} from "@/lib/skill-nexus/derivations";
+import {
   AlertCircle,
   ArrowDownNarrowWide,
   Award,
@@ -531,6 +537,35 @@ function reasonFor(item: SkillNexusItem): string {
   return parts.join(" · ");
 }
 
+// Group wrapper for the three derived-signal sections in the Issues tab.
+// Keeps the panel readable when several different signal classes co-exist.
+function SignalSection({
+  title,
+  hint,
+  tone,
+  children,
+}: {
+  title: string;
+  hint: string;
+  tone: "warning" | "info" | "critical";
+  children: React.ReactNode;
+}) {
+  const toneClass = tone === "critical"
+    ? "text-destructive"
+    : tone === "warning"
+    ? "text-yellow-300"
+    : "text-primary";
+  return (
+    <div className="space-y-1.5">
+      <div className="flex items-baseline gap-2 font-mono text-[9px] uppercase">
+        <span className={cn("font-bold", toneClass)}>{title}</span>
+        <span className="text-muted-foreground/70">· {hint}</span>
+      </div>
+      <div className="space-y-1">{children}</div>
+    </div>
+  );
+}
+
 function IssuesPanel({
   report,
   warnings,
@@ -543,6 +578,12 @@ function IssuesPanel({
   sortMode: "default" | "recent";
 }) {
   const [copied, setCopied] = useState(false);
+
+  // Derived signals — saturation, heartbeats, cross-system bottlenecks. Computed
+  // pure-functionally from the same snapshot, so no extra API calls.
+  const saturation = useMemo(() => (report ? deriveSaturation(report) : []), [report]);
+  const heartbeats = useMemo(() => (report ? deriveHeartbeats(report) : []), [report]);
+  const bottlenecks = useMemo(() => (report ? deriveBottlenecks(report) : []), [report]);
 
   const problems = useMemo(() => {
     if (!report) return [];
@@ -577,6 +618,28 @@ function IssuesPanel({
     const lines: string[] = [];
     lines.push(`Skill Nexus — Issues Report (${new Date().toISOString()})`);
     lines.push("");
+    if (saturation.length > 0) {
+      lines.push(`# Saturation (${saturation.length})`);
+      for (const s of saturation) {
+        const pct = s.capacity > 0 ? Math.round((s.used / s.capacity) * 100) : 0;
+        lines.push(`  [${s.domainLabel}] ${s.used}/${s.capacity} (${pct}%) — ${s.what}`);
+      }
+      lines.push("");
+    }
+    if (heartbeats.length > 0) {
+      lines.push(`# Heartbeats (${heartbeats.length})`);
+      for (const h of heartbeats) {
+        lines.push(`  [${h.domainLabel}] ${formatAgeMs(h.ageMs)} · ${h.status}`);
+      }
+      lines.push("");
+    }
+    if (bottlenecks.length > 0) {
+      lines.push(`# Bottlenecks (${bottlenecks.length})`);
+      for (const b of bottlenecks) {
+        lines.push(`  [${b.label}] ${b.detail}`);
+      }
+      lines.push("");
+    }
     if (warnings.length > 0) {
       lines.push(`# Domain warnings (${warnings.length})`);
       for (const w of warnings) {
@@ -611,15 +674,21 @@ function IssuesPanel({
       setCopied(true);
       setTimeout(() => setCopied(false), 1500);
     }
-  }, [warnings, problems]);
+  }, [warnings, problems, saturation, heartbeats, bottlenecks]);
 
+  // Derived signals don't always count as "issues" (info-level saturation, etc.),
+  // so the header total uses only warnings + problems. The detail sections render
+  // independently below.
   const total = warnings.length + problems.length;
+  const signalCount = saturation.length + heartbeats.length + bottlenecks.length;
 
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between gap-2">
         <span className="font-mono text-[9px] uppercase text-muted-foreground">
-          {total === 0 ? "0 issues" : `${total} total · ${warnings.length} warning${warnings.length === 1 ? "" : "s"} · ${problems.length} fail${problems.length === 1 ? "" : "s"}`}
+          {total === 0 && signalCount === 0
+            ? "0 issues"
+            : `${total + signalCount} total · ${warnings.length} warn · ${problems.length} fail${signalCount > 0 ? ` · ${signalCount} signal${signalCount === 1 ? "" : "s"}` : ""}`}
         </span>
         <Button
           type="button"
@@ -636,11 +705,101 @@ function IssuesPanel({
       </div>
       <ScrollArea className="h-[320px] rounded border border-white/10 bg-black/30 p-2">
         <div className="space-y-2">
-          {warnings.length === 0 && problems.length === 0 && (
+          {warnings.length === 0 && problems.length === 0 && signalCount === 0 && (
             <div className="rounded border border-white/10 bg-black/20 p-3 font-mono text-[10px] text-muted-foreground">
-              All clear — no warnings or item problems.
+              All clear — no warnings, no problems, no degraded signals.
             </div>
           )}
+
+          {/* === Saturation — capacity-pressed signals. Derived from truncation
+               warnings + implicit FILE_CAP for skill-root domains. === */}
+          {saturation.length > 0 && (
+            <SignalSection title="Saturation" hint="capacity & truncation" tone="warning">
+              {saturation.map((s, idx) => {
+                const pct = s.capacity > 0 ? (s.used / s.capacity) * 100 : 0;
+                return (
+                  <button
+                    key={`sat-${s.domainId}-${idx}`}
+                    type="button"
+                    onClick={() => onJumpToDomain(s.domainId)}
+                    className="w-full rounded border border-white/10 bg-black/20 px-2 py-1.5 text-left hover:border-yellow-500/30"
+                  >
+                    <div className="flex items-center justify-between gap-2 font-mono text-[9px] uppercase">
+                      <span className="text-yellow-300">{s.domainLabel}</span>
+                      <span className={cn(
+                        "shrink-0",
+                        s.severity === "critical" ? "text-destructive" : s.severity === "warning" ? "text-yellow-300" : "text-muted-foreground"
+                      )}>
+                        {s.used.toLocaleString()} / {s.capacity.toLocaleString()} ({pct.toFixed(pct < 10 ? 1 : 0)}%)
+                      </span>
+                    </div>
+                    <div className="mt-1 h-1 overflow-hidden rounded bg-white/5">
+                      <div
+                        className={cn(
+                          "h-full",
+                          s.severity === "critical" ? "bg-destructive/70" : s.severity === "warning" ? "bg-yellow-500/60" : "bg-secondary/50"
+                        )}
+                        style={{ width: `${Math.min(100, Math.max(2, pct))}%` }}
+                      />
+                    </div>
+                    <p className="mt-1 truncate text-[8px] opacity-70" title={s.what}>{s.what}</p>
+                  </button>
+                );
+              })}
+            </SignalSection>
+          )}
+
+          {/* === Heartbeats — domains whose freshest item exceeds the expected
+               cadence. Critical when 3× over, warning when 1× over. === */}
+          {heartbeats.length > 0 && (
+            <SignalSection title="Heartbeats" hint="freshness vs expected cadence" tone="info">
+              {heartbeats.map((h, idx) => (
+                <button
+                  key={`hb-${h.domainId}-${idx}`}
+                  type="button"
+                  onClick={() => onJumpToDomain(h.domainId)}
+                  className={cn(
+                    "flex w-full items-center justify-between gap-2 rounded border bg-black/20 px-2 py-1.5 text-left font-mono text-[9px] hover:border-primary/30",
+                    h.severity === "critical"
+                      ? "border-destructive/30 text-destructive"
+                      : h.severity === "warning"
+                      ? "border-yellow-500/30 text-yellow-300"
+                      : "border-white/10 text-muted-foreground"
+                  )}
+                >
+                  <span className="truncate uppercase">{h.domainLabel}</span>
+                  <span className="shrink-0">
+                    {h.status === "unreachable" ? "unreachable" : `${formatAgeMs(h.ageMs)} · ${h.status}`}
+                  </span>
+                </button>
+              ))}
+            </SignalSection>
+          )}
+
+          {/* === Cross-system bottlenecks — derived rollups across domains.
+               Captures the "where is my pipeline stuck?" question. === */}
+          {bottlenecks.length > 0 && (
+            <SignalSection title="Bottlenecks" hint="cross-system rollups" tone="critical">
+              {bottlenecks.map((b) => (
+                <div
+                  key={b.id}
+                  className={cn(
+                    "rounded border bg-black/20 px-2 py-1.5 font-mono text-[9px]",
+                    b.severity === "critical"
+                      ? "border-destructive/30 text-destructive"
+                      : b.severity === "warning"
+                      ? "border-yellow-500/30 text-yellow-300"
+                      : "border-white/10 text-muted-foreground"
+                  )}
+                >
+                  <div className="font-bold uppercase">{b.label}</div>
+                  <p className="mt-0.5 text-[9px] normal-case opacity-90">{b.detail}</p>
+                </div>
+              ))}
+            </SignalSection>
+          )}
+
+          {/* === Adapter-emitted warnings (existing) === */}
           {warnings.map((entry, idx) => (
             <div key={`warn-${idx}`} className="flex items-start gap-2 rounded border border-yellow-500/30 bg-yellow-500/5 px-2 py-1.5 font-mono text-[10px]">
               <FileWarning className="mt-0.5 h-3 w-3 shrink-0 text-yellow-400" />

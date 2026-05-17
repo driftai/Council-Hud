@@ -24,6 +24,13 @@ type ModelHealthBadge = {
   reason?: string;
 };
 
+type SwapSuggestion = {
+  modelRef: string;
+  score: number;
+  capabilities: string[];
+  capabilityOverlap: number;
+};
+
 type Snapshot = {
   available: boolean;
   baselineScore: number;
@@ -40,6 +47,7 @@ type Snapshot = {
   restartCount: number;
   appliedGenome?: Record<string, string | number>;
   genomeHealth?: Record<string, ModelHealthBadge>;
+  swapSuggestions?: Record<string, SwapSuggestion[]>;
   source: string;
 };
 
@@ -352,14 +360,34 @@ export function AutoResearch() {
                       ? `${decommissioned.length} decommissioned model${decommissioned.length === 1 ? "" : "s"} in genome`
                       : `${unhealthy.length} unhealthy model${unhealthy.length === 1 ? "" : "s"} in genome`}
                   </div>
-                  <ul className="mt-0.5 space-y-0.5 text-[8px] normal-case opacity-90">
-                    {flagged.map(([field, badge]) => (
-                      <li key={field} className="truncate" title={`${field}: ${badge.modelRef}${badge.reason ? ` — ${badge.reason}` : ""}`}>
-                        <span className="opacity-80">{field}:</span>{" "}
-                        <span className="font-medium">{badge.status}</span>
-                        {badge.reason ? ` — ${badge.reason}` : ""}
-                      </li>
-                    ))}
+                  <ul className="mt-0.5 space-y-1 text-[8px] normal-case opacity-90">
+                    {flagged.map(([field, badge]) => {
+                      const swaps = snap?.swapSuggestions?.[field] || [];
+                      return (
+                        <li key={field} title={`${field}: ${badge.modelRef}${badge.reason ? ` — ${badge.reason}` : ""}`}>
+                          <div className="truncate">
+                            <span className="opacity-80">{field}:</span>{" "}
+                            <span className="font-medium">{badge.status}</span>
+                            {badge.reason ? ` — ${badge.reason}` : ""}
+                          </div>
+                          {swaps.length > 0 && (
+                            <div className="mt-0.5 flex flex-wrap items-center gap-1 pl-2 opacity-90">
+                              <span className="text-[7px] uppercase opacity-70">try:</span>
+                              {swaps.map((s) => (
+                                <span
+                                  key={s.modelRef}
+                                  className="rounded border border-secondary/30 bg-secondary/10 px-1 text-[7px] text-secondary"
+                                  title={`Score ${s.score.toFixed(0)} · caps: ${s.capabilities.join(", ") || "n/a"}`}
+                                >
+                                  {s.modelRef.length > 26 ? `…${s.modelRef.slice(-24)}` : s.modelRef}
+                                  <span className="ml-1 opacity-70">{s.score.toFixed(0)}</span>
+                                </span>
+                              ))}
+                            </div>
+                          )}
+                        </li>
+                      );
+                    })}
                   </ul>
                 </div>
               </div>
