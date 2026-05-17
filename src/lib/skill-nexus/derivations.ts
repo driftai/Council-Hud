@@ -86,7 +86,7 @@ const EXPECTED_CADENCE_HOURS: Record<string, number> = {
   "skill-evolver": 72,
   "evolution-history": 72,
   "experiment-results": 72,
-  "skill-forge-pipeline": 24 * 30,
+  "skill-forge-pipeline": 6,
   "session-miner": 24 * 14,
   "council-journal-feed": 24 * 7,
   "openclaw-skills": 24 * 60,
