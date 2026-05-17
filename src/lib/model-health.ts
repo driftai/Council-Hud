@@ -303,3 +303,26 @@ export async function suggestGenomeSwaps(
   }
   return out;
 }
+
+// Total count of routable (score >= threshold, not decommissioned) provider×model
+// pairings in the Smart Fallback registry. Used by the HUD as a single aggregate
+// — "the loop has N healthy candidates to mutate over" — instead of prescribing
+// specific swaps. Replaces the old top-3-per-field chip rendering which felt
+// like a directive against autoresearch's own scoring.
+export async function getHealthyPoolSize(): Promise<number> {
+  const cfg = loadCouncilConfig();
+  const { healthMap, registry } = await loadSources(cfg.smartFallback.healthFile);
+  if (registry.length === 0) return 0;
+  let count = 0;
+  for (const m of registry) {
+    if (!m.id || DECOMMISSIONED_MODELS[m.id]) continue;
+    for (const provider of m.providers || []) {
+      const score = Number(healthMap.get(provider.model_ref || "") ?? 0);
+      if (score >= UNHEALTHY_SCORE) {
+        count += 1;
+        break; // count the model once; one healthy provider is enough
+      }
+    }
+  }
+  return count;
+}
