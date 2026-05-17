@@ -50,6 +50,20 @@ type RawHealth = {
   health?: Record<string, { score?: number; circuit?: { state?: string; reason?: string } }>;
 };
 
+// Smart-fallback model-registry.json shape (relevant subset):
+//   { "models": [ { "id": "...", "capabilities": [...], "providers": [...] } ] }
+// Lives next to model-health.json. Used to suggest capability-matched healthy
+// replacements for any model flagged decommissioned or unhealthy.
+type RegistryModel = {
+  id: string;
+  display?: string;
+  capabilities?: string[];
+  providers?: Array<{ name?: string; model_ref?: string; api_key_env?: string }>;
+};
+type RawRegistry = {
+  models?: RegistryModel[];
+};
+
 // Threshold below which a model is "unhealthy" but not decommissioned. The
 // engine deboost-routes anything <25 in its graded search, so the same cutoff
 // gives operators a consistent signal.
@@ -66,27 +80,50 @@ export const MODEL_GENOME_FIELDS = new Set([
   "summary_model",
 ]);
 
-let cache: { healthMap: Map<string, number>; ageMs: number } | null = null;
+type CachedSources = {
+  healthMap: Map<string, number>;
+  registry: RegistryModel[];
+  ageMs: number;
+};
+let cache: CachedSources | null = null;
 const CACHE_TTL_MS = 15_000;
 
-async function loadHealth(path: string): Promise<Map<string, number>> {
+async function loadSources(healthPath: string): Promise<CachedSources> {
   const now = Date.now();
-  if (cache && now - cache.ageMs < CACHE_TTL_MS) return cache.healthMap;
-  let raw: RawHealth | null = null;
+  if (cache && now - cache.ageMs < CACHE_TTL_MS) return cache;
+
+  let rawHealth: RawHealth | null = null;
   try {
-    raw = JSON.parse(await fs.readFile(path, "utf8")) as RawHealth;
+    rawHealth = JSON.parse(await fs.readFile(healthPath, "utf8")) as RawHealth;
   } catch {
-    raw = null;
+    rawHealth = null;
   }
-  const map = new Map<string, number>();
-  if (raw?.health) {
-    for (const [modelId, info] of Object.entries(raw.health)) {
+  const healthMap = new Map<string, number>();
+  if (rawHealth?.health) {
+    for (const [modelId, info] of Object.entries(rawHealth.health)) {
       const score = Number(info?.score);
-      if (Number.isFinite(score)) map.set(modelId, score);
+      if (Number.isFinite(score)) healthMap.set(modelId, score);
     }
   }
-  cache = { healthMap: map, ageMs: now };
-  return map;
+
+  // model-registry.json lives in the same directory as model-health.json. Read
+  // best-effort — when missing we still answer status queries, just without
+  // capability-matched swap suggestions.
+  const registryPath = healthPath.replace(/model-health\.json$/i, "model-registry.json");
+  let registry: RegistryModel[] = [];
+  try {
+    const raw = JSON.parse(await fs.readFile(registryPath, "utf8")) as RawRegistry;
+    registry = Array.isArray(raw?.models) ? raw.models : [];
+  } catch {
+    registry = [];
+  }
+
+  cache = { healthMap, registry, ageMs: now };
+  return cache;
+}
+
+async function loadHealth(path: string): Promise<Map<string, number>> {
+  return (await loadSources(path)).healthMap;
 }
 
 // A genome value like "nvidia-speedsters/stepfun-ai/step-3.5-flash" carries
@@ -180,6 +217,89 @@ export async function assessGenomeModels(
     if (!isModelField && (typeof value !== "string" || !value.includes("/"))) continue;
     const badge = await assessModel(value);
     if (badge) out[key] = badge;
+  }
+  return out;
+}
+
+export type SwapSuggestion = {
+  modelRef: string;
+  score: number;
+  capabilities: string[];
+  capabilityOverlap: number;
+};
+
+// Find capability-matched healthy replacements for an unhealthy / decommissioned
+// model. Strategy:
+//   1. Look up the bad model in the registry to capture its capability list.
+//   2. Score every other registry model by overlap with that capability set,
+//      filtered to: not decommissioned, healthy score (>= UNHEALTHY_SCORE).
+//   3. Return the top N by (overlap, score) tuple.
+//
+// When the bad model is missing from the registry we fall back to "top N
+// healthy models" with no capability filter — useful when the genome carries
+// an old reference that's been deleted from the registry.
+export async function getHealthySwapSuggestions(
+  badModelRef: string,
+  limit = 3
+): Promise<SwapSuggestion[]> {
+  const cfg = loadCouncilConfig();
+  const { healthMap, registry } = await loadSources(cfg.smartFallback.healthFile);
+  if (registry.length === 0) return [];
+
+  // Find the bad model's registry entry — search both by id and via stripped provider prefixes.
+  const candidateRefs = new Set(extractModelRefs(badModelRef));
+  const badEntry = registry.find((m) => candidateRefs.has(m.id));
+  const targetCaps = new Set(badEntry?.capabilities || []);
+
+  type Candidate = SwapSuggestion & { isDecommissioned: boolean };
+  const scored: Candidate[] = [];
+  for (const m of registry) {
+    if (!m.id || candidateRefs.has(m.id)) continue;
+    if (DECOMMISSIONED_MODELS[m.id]) continue;
+
+    // Pick the best score across providers — a model is healthy if ANY provider
+    // routes well, even when other providers for the same model are flaky.
+    let best = healthMap.get(m.id) ?? -1;
+    for (const provider of m.providers || []) {
+      const providerKey = provider.model_ref || "";
+      const providerScore = healthMap.get(providerKey);
+      if (typeof providerScore === "number" && providerScore > best) best = providerScore;
+    }
+    if (best < UNHEALTHY_SCORE) continue;
+
+    const caps = m.capabilities || [];
+    const overlap = targetCaps.size === 0
+      ? caps.length
+      : caps.filter((c) => targetCaps.has(c)).length;
+
+    scored.push({
+      modelRef: m.id,
+      score: best,
+      capabilities: caps,
+      capabilityOverlap: overlap,
+      isDecommissioned: false,
+    });
+  }
+
+  scored.sort((a, b) => {
+    if (b.capabilityOverlap !== a.capabilityOverlap) return b.capabilityOverlap - a.capabilityOverlap;
+    return b.score - a.score;
+  });
+
+  return scored.slice(0, limit).map(({ isDecommissioned: _unused, ...rest }) => rest);
+}
+
+// Build a {field → suggestions[]} map for any flagged entry in a genome health
+// assessment. Healthy entries are skipped — only the rows that NEED swapping
+// get suggestion lists, which keeps the payload tight.
+export async function suggestGenomeSwaps(
+  genomeHealth: Record<string, ModelHealthBadge>
+): Promise<Record<string, SwapSuggestion[]>> {
+  const out: Record<string, SwapSuggestion[]> = {};
+  for (const [field, badge] of Object.entries(genomeHealth)) {
+    if (badge.status !== "decommissioned" && badge.status !== "unhealthy") continue;
+    const suggestions = await getHealthySwapSuggestions(badge.modelRef, 3);
+    if (suggestions.length > 0) out[field] = suggestions;
   }
   return out;
 }

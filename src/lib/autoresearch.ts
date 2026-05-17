@@ -4,7 +4,7 @@ import { promises as fs } from "node:fs";
 import { dirname, join } from "node:path";
 
 import { loadCouncilConfig } from "@/lib/council-config";
-import { assessGenomeModels, type ModelHealthBadge } from "@/lib/model-health";
+import { assessGenomeModels, suggestGenomeSwaps, type ModelHealthBadge, type SwapSuggestion } from "@/lib/model-health";
 
 // AutoResearch is the openclaw evolution loop — a long-running optimization process that
 // proposes mutations to the agent genome, evaluates each via a multi-judge composite, and
@@ -42,6 +42,10 @@ export type AutoResearchSnapshot = {
   // to the row it renders. Field values that don't look like model refs are
   // omitted rather than receiving an "ok" badge — keeps the map small.
   genomeHealth?: Record<string, ModelHealthBadge>;
+  // Suggested healthy swaps for any flagged genome field. Keyed the same way
+  // as genomeHealth; only fields that are decommissioned/unhealthy AND have at
+  // least one viable replacement in the Smart Fallback catalog appear here.
+  swapSuggestions?: Record<string, SwapSuggestion[]>;
   source: string;
 };
 
@@ -165,6 +169,9 @@ export async function getAutoResearchSnapshot(): Promise<AutoResearchSnapshot> {
   // the loop is converging on. If the applied genome differs, the same check
   // could be run against it; for now the two coincide in practice.
   const genomeHealth = await assessGenomeModels(bestGenome);
+  // Capability-matched suggestions from Smart Fallback's catalog. Empty when
+  // every model in the genome is already healthy.
+  const swapSuggestions = await suggestGenomeSwaps(genomeHealth);
 
   return {
     available: true,
@@ -182,6 +189,7 @@ export async function getAutoResearchSnapshot(): Promise<AutoResearchSnapshot> {
     restartCount,
     appliedGenome,
     genomeHealth,
+    swapSuggestions,
     source: "state.json",
   };
 }
