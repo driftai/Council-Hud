@@ -11,6 +11,7 @@ import {
   deriveSaturation,
   formatAge as formatAgeMs,
 } from "@/lib/skill-nexus/derivations";
+import { ExperimentSummary } from "./skill-nexus/ExperimentSummary";
 import {
   AlertCircle,
   ArrowDownNarrowWide,
@@ -913,6 +914,13 @@ function DomainPanel({
             </div>
           ))}
         </div>
+      )}
+
+      {/* Per-type aggregate summaries — collapses 60 nearly-identical rows into
+          signal-dense panels (judge averages, dim breakdowns, near-misses).
+          The per-item list still renders below; nothing is hidden, just framed. */}
+      {(domain.type === "experimentResults" || (domain.id === "evolution-history" && visible.length > 8)) && (
+        <ExperimentSummary items={visible} />
       )}
 
       <ScrollArea className={cn("rounded border border-white/10 bg-black/30 p-2", expanded ? "h-[calc(100vh-22rem)]" : "h-[300px]")}>
