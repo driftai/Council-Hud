@@ -7,6 +7,10 @@ import type { SkillNexusAdapter, SkillNexusDomainSnapshot, SkillNexusItem } from
 import type { SkillNexusDomainConfig } from "@/lib/council-config";
 import { loadCouncilConfig } from "@/lib/council-config";
 import { clampText, isStale, safeReadText, shortHash, stripMarkdownPreview, toRelativePath, walkSkillRoot } from "../helpers";
+import { createDedupTracker } from "../dedup";
+import { isStructuralFile } from "../structural";
+import { buildGlobMatcher } from "../glob-filter";
+import { resolveVendor } from "../vendor";
 
 // Skill Root adapter: scans a directory tree for SKILL.md / skill.md / *.md / *.json metadata
 // files. Treats SKILL.md as authoritative; other markdown files are docs. Cap on depth +
@@ -70,30 +74,35 @@ export const skillRootAdapter: SkillNexusAdapter = {
     });
 
     const items: SkillNexusItem[] = [];
-    // Track unique folders per skill title so that two formats of the same skill
-    // (para-second-brain/SKILL.md + para-second-brain/skill.json) don't dupe each other.
-    // Only count a collision when two DIFFERENT folders advertise the same title.
-    const seenFolders = new Map<string, Set<string>>();
+    // Dedup tracker — collisions count by (vendor, name, folder). Two formats in the
+    // same folder don't dupe; two vendors shipping a same-name skill don't dupe.
+    // Backed by `../dedup.ts` so other adapters can use the same policy.
+    const dedup = createDedupTracker();
     const warnings: string[] = [];
     let problemCount = 0;
 
     // Cap: skill roots with many docs (Hermes-style mirrors of dozens of agents) regularly
     // exceed 400. Bumped to 800 to fit those without truncation, while still bounding scan cost.
     const FILE_CAP = 800;
-    // Structural per-folder files repeat once per skill folder by design. Excluded from
-    // the item feed entirely (not just from dupe accounting) — they're pure noise that
-    // bloated openclaw-skills past 500 items. Canonical SKILL.md still surfaces.
-    const STRUCTURAL_FILES = new Set([
-      "_meta.json", "evolution_meta.json", "package.json",
-      "openai.yaml", "license.txt", "notice.txt", "description.md",
-      "readme.md", "index.js", "__init__.py", "tsconfig.json",
-    ]);
+    // Per-domain ignored globs — Hermes mirrors LLM-friendly reference-doc dumps
+    // (`references/llms-*.md`) that are megabytes large and not skills. Configurable
+    // per domain so any feed can hide its known noise. Falls back to the global
+    // skillNexus.ignoredGlobs when the domain doesn't set its own.
+    const perDomainGlobs = Array.isArray(domain.source?.ignoredGlobs) ? (domain.source.ignoredGlobs as string[]) : null;
+    const isIgnored = buildGlobMatcher(perDomainGlobs || cfg.skillNexus.ignoredGlobs);
     let suppressedStructural = 0;
+    let suppressedIgnored = 0;
     for (const file of files.slice(0, FILE_CAP)) {
       const relPath = toRelativePath(file.absPath, rootPath);
       const fileBase = (relPath.split("/").pop() || "").toLowerCase();
+      // Per-domain glob exclude — runs before any reading so we save the I/O too.
+      if (perDomainGlobs && isIgnored(relPath)) {
+        suppressedIgnored += 1;
+        continue;
+      }
       // Surface canonical SKILL.md always; suppress structural per-folder files entirely.
-      if (file.type !== "skill.md" && STRUCTURAL_FILES.has(fileBase)) {
+      // Structural list lives in `../structural.ts`.
+      if (file.type !== "skill.md" && isStructuralFile(fileBase)) {
         suppressedStructural += 1;
         continue;
       }
@@ -131,24 +140,21 @@ export const skillRootAdapter: SkillNexusAdapter = {
       const name = clampText(baseName, 80);
       const stale = isStale(read.mtime, 90);
 
-      // Duplicate detection: only flag when the **canonical SKILL.md** of two different
-      // skill folders carries the same title (or the same folder name). The structural-file
-      // filter at the top of the loop already removed _meta.json / package.json / etc.,
-      // so only SKILL.md reaches this point.
-      // The evolver clones a parent skill into `<name>-evolved/` while a trial is alive.
-      // Both folders carry the same title by design — the Skill Evolver adapter handles
-      // the parent/child pairing already, so exclude evolved variants from dupe accounting.
+      // Duplicate detection delegated to `../dedup.ts`. Policy:
+      //   - Only canonical SKILL.md files participate (structural files were already filtered).
+      //   - `-evolved` variants are recorded as `variant: true` and excluded from accounting
+      //     (the Skill Evolver adapter handles parent/child pairing).
+      //   - Vendor namespace (from frontmatter or folder-name prefix via `../vendor.ts`)
+      //     distinguishes cross-vendor releases that happen to share a title.
       const folderName = (skillFolder.split("/").pop() || "").toLowerCase();
       const isEvolvedVariant = folderName.endsWith("-evolved");
-      const eligibleForDupe = file.type === "skill.md" && !isEvolvedVariant && skillFolder.length > 0;
-      const dupeKey = name.toLowerCase();
-      let dupeCount = 0;
-      if (eligibleForDupe) {
-        const folders = seenFolders.get(dupeKey) || new Set<string>();
-        folders.add(skillFolder);
-        seenFolders.set(dupeKey, folders);
-        dupeCount = folders.size;
-      }
+      const vendor = file.type === "skill.md" ? resolveVendor(read.content, skillFolder) : "";
+      const { count: dupeCount } = dedup.record({
+        name,
+        vendor,
+        folder: skillFolder,
+        variant: isEvolvedVariant || file.type !== "skill.md" || skillFolder.length === 0,
+      });
 
       // Missing-description warning per the original spec.
       const missingDescription = file.type === "skill.md" && !preview.description;
@@ -183,8 +189,9 @@ export const skillRootAdapter: SkillNexusAdapter = {
         status,
         tags,
         // Slim meta: drop noisy structural counts (headings, bullets). codeBlocks signals
-        // "has examples" — that's the only one worth a pill. Other fields stay only when present.
+        // "has examples" — that's the only one worth a pill. Vendor surfaces only when set.
         meta: {
+          ...(vendor ? { vendor } : {}),
           ...(preview.homepage ? { homepage: preview.homepage } : {}),
           ...(preview.version ? { version: preview.version } : {}),
           ...(preview.license ? { license: preview.license } : {}),
@@ -214,6 +221,7 @@ export const skillRootAdapter: SkillNexusAdapter = {
       meta: {
         skillCount,
         ...(suppressedStructural > 0 ? { suppressedStructural } : {}),
+        ...(suppressedIgnored > 0 ? { suppressedIgnored } : {}),
         docCount: items.length - skillCount,
         rootReachable: true,
       },

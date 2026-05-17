@@ -271,6 +271,31 @@ export const skillEvolverAdapter: SkillNexusAdapter = {
     }
 
     // --- Optional appliedPath: last applied genome ---
+    // Staleness here means "no new genome has been promoted in N days". The default
+    // is 90 days because a stable incumbent that nothing has beaten is a normal
+    // outcome of a well-tuned evolver (the trial loop keeps running, but the bar
+    // to displace the current best stays high). 14 days was producing false alarms
+    // every time autoresearch settled. The Skill Nexus item still surfaces the file's
+    // age via mtime regardless, so operators can see the lull at a glance.
+    //
+    // Heartbeat override: if `historyPath` is set and history.jsonl was updated in
+    // the last 14 days, autoresearch is demonstrably alive — skip the stale flag.
+    const appliedStaleDaysSource = domain.source?.appliedStaleDays;
+    const appliedStaleDays = typeof appliedStaleDaysSource === "number" && appliedStaleDaysSource >= 0
+      ? appliedStaleDaysSource
+      : 90;
+    const historyPath = String(domain.source?.historyPath || "").trim();
+    let heartbeatFresh = false;
+    if (historyPath) {
+      try {
+        const stat = await fs.stat(historyPath);
+        heartbeatFresh = !isStale(stat.mtimeMs, 14);
+        lastEvolutionActivity = Math.max(lastEvolutionActivity, stat.mtimeMs);
+      } catch {
+        // history.jsonl missing — fall back to applied-genome staleness alone.
+      }
+    }
+
     if (appliedPath) {
       const read = await safeReadText(appliedPath, stateMaxBytes);
       if (read && !("oversized" in read)) {
@@ -279,19 +304,23 @@ export const skillEvolverAdapter: SkillNexusAdapter = {
           const parsed = JSON.parse(read.content);
           const appliedAt = Number(parsed?.appliedAt ?? parsed?.timestamp ?? read.mtime);
           const score = Number(parsed?.score ?? parsed?.bestScore ?? NaN);
+          const isReplacementStale = appliedStaleDays > 0
+            && !heartbeatFresh
+            && isStale(appliedAt, appliedStaleDays);
           items.push({
             id: shortHash(`evolver|applied|${appliedAt}`),
             name: "Last applied genome",
             description: Number.isFinite(score) ? `score ${(score as number).toFixed(3)}` : "applied genome",
             mtime: appliedAt,
-            status: isStale(appliedAt, 14) ? "stale" : "ok",
-            tags: ["evolver-applied"],
+            status: isReplacementStale ? "stale" : "ok",
+            tags: ["evolver-applied", ...(heartbeatFresh ? ["heartbeat-fresh"] : [])],
             meta: {
               ...(Number.isFinite(score) ? { score: Number((score as number).toFixed(3)) } : {}),
               ...(parsed?.genome ? { genome: String(parsed.genome).slice(0, 12) } : {}),
+              ...(heartbeatFresh ? { heartbeat: "fresh" } : {}),
             },
           });
-          if (isStale(appliedAt, 14)) problemCount += 1;
+          if (isReplacementStale) problemCount += 1;
         } catch {
           warnings.push("applied_genome.json parse error.");
         }
