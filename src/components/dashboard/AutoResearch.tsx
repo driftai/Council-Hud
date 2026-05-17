@@ -5,7 +5,7 @@ import { DashboardCard } from "./DashboardCard";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { cn } from "@/lib/utils";
-import { AlertCircle, BarChartHorizontal, ChevronDown, ChevronUp, Dna, FlaskConical, RefreshCcw, Target, TrendingUp } from "lucide-react";
+import { AlertCircle, AlertTriangle, BarChartHorizontal, ChevronDown, ChevronUp, Dna, FlaskConical, RefreshCcw, ShieldAlert, Target, TrendingUp } from "lucide-react";
 
 type Trial = {
   experiment: number;
@@ -15,6 +15,13 @@ type Trial = {
   kept: boolean;
   mutations: number;
   timestamp: number;
+};
+
+type ModelHealthBadge = {
+  modelRef: string;
+  status: "ok" | "unhealthy" | "decommissioned" | "unknown";
+  score?: number;
+  reason?: string;
 };
 
 type Snapshot = {
@@ -32,6 +39,7 @@ type Snapshot = {
   trend: number[];
   restartCount: number;
   appliedGenome?: Record<string, string | number>;
+  genomeHealth?: Record<string, ModelHealthBadge>;
   source: string;
 };
 
@@ -319,15 +327,71 @@ export function AutoResearch() {
             <Dna className="h-3 w-3 text-primary" />
             <span>Best genome (current target)</span>
           </div>
-          <div className="grid grid-cols-2 gap-x-2 gap-y-0.5 font-mono text-[9px]">
-            {orderedGenome.slice(0, 10).map(([k, v]) => (
-              <div key={k} className="flex items-center justify-between gap-2">
-                <span className="truncate text-muted-foreground/80" title={k}>{k}</span>
-                <span className="shrink-0 text-foreground/80" title={String(v)}>
-                  {typeof v === "string" && v.length > 18 ? `…${v.slice(-16)}` : String(v)}
-                </span>
+          {/* Banner if the genome references any decommissioned or unhealthy model.
+              Crucial visibility for the operator — a genome targeting a retired
+              NVIDIA NIM endpoint will fail at runtime until the loop discovers
+              the regression. */}
+          {(() => {
+            const health = snap?.genomeHealth || {};
+            const flagged = Object.entries(health).filter(
+              ([, badge]) => badge.status === "decommissioned" || badge.status === "unhealthy"
+            );
+            if (flagged.length === 0) return null;
+            const decommissioned = flagged.filter(([, b]) => b.status === "decommissioned");
+            const unhealthy = flagged.filter(([, b]) => b.status === "unhealthy");
+            const tone = decommissioned.length > 0
+              ? "border-destructive/40 bg-destructive/5 text-destructive"
+              : "border-yellow-500/40 bg-yellow-500/5 text-yellow-300";
+            const Icon = decommissioned.length > 0 ? ShieldAlert : AlertTriangle;
+            return (
+              <div className={cn("mb-1.5 flex items-start gap-2 rounded border px-2 py-1 font-mono text-[9px]", tone)}>
+                <Icon className="mt-0.5 h-3 w-3 shrink-0" />
+                <div className="min-w-0 flex-1">
+                  <div className="uppercase">
+                    {decommissioned.length > 0
+                      ? `${decommissioned.length} decommissioned model${decommissioned.length === 1 ? "" : "s"} in genome`
+                      : `${unhealthy.length} unhealthy model${unhealthy.length === 1 ? "" : "s"} in genome`}
+                  </div>
+                  <ul className="mt-0.5 space-y-0.5 text-[8px] normal-case opacity-90">
+                    {flagged.map(([field, badge]) => (
+                      <li key={field} className="truncate" title={`${field}: ${badge.modelRef}${badge.reason ? ` — ${badge.reason}` : ""}`}>
+                        <span className="opacity-80">{field}:</span>{" "}
+                        <span className="font-medium">{badge.status}</span>
+                        {badge.reason ? ` — ${badge.reason}` : ""}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
               </div>
-            ))}
+            );
+          })()}
+          <div className="grid grid-cols-2 gap-x-2 gap-y-0.5 font-mono text-[9px]">
+            {orderedGenome.slice(0, 10).map(([k, v]) => {
+              const badge = snap?.genomeHealth?.[k];
+              const badgeTone = !badge || badge.status === "ok"
+                ? ""
+                : badge.status === "decommissioned"
+                ? "text-destructive"
+                : badge.status === "unhealthy"
+                ? "text-yellow-300"
+                : "text-muted-foreground/60";
+              return (
+                <div key={k} className="flex items-center justify-between gap-2">
+                  <span className="truncate text-muted-foreground/80" title={k}>{k}</span>
+                  <span
+                    className={cn("flex shrink-0 items-center gap-1 text-foreground/80", badgeTone)}
+                    title={badge?.reason ? `${v} — ${badge.reason}` : String(v)}
+                  >
+                    {badge && badge.status !== "ok" && badge.status !== "unknown" && (
+                      <AlertCircle className="h-2.5 w-2.5" />
+                    )}
+                    <span>
+                      {typeof v === "string" && v.length > 18 ? `…${v.slice(-16)}` : String(v)}
+                    </span>
+                  </span>
+                </div>
+              );
+            })}
           </div>
         </div>
 

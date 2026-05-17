@@ -4,6 +4,7 @@ import { promises as fs } from "node:fs";
 import { dirname, join } from "node:path";
 
 import { loadCouncilConfig } from "@/lib/council-config";
+import { assessGenomeModels, type ModelHealthBadge } from "@/lib/model-health";
 
 // AutoResearch is the openclaw evolution loop — a long-running optimization process that
 // proposes mutations to the agent genome, evaluates each via a multi-judge composite, and
@@ -36,6 +37,11 @@ export type AutoResearchSnapshot = {
   trend: number[]; // last ~30 trial scores for a sparkline
   restartCount: number;
   appliedGenome?: Record<string, string | number>;
+  // Per-field health badges for model-shaped genome values. Keyed by the genome
+  // field name (e.g. "heartbeat_model") so the UI can attach a badge directly
+  // to the row it renders. Field values that don't look like model refs are
+  // omitted rather than receiving an "ok" badge — keeps the map small.
+  genomeHealth?: Record<string, ModelHealthBadge>;
   source: string;
 };
 
@@ -153,6 +159,13 @@ export async function getAutoResearchSnapshot(): Promise<AutoResearchSnapshot> {
   const totalExperiments = safeNumber(state.total_experiments);
   const keptRate = totalExperiments > 0 ? kept / totalExperiments : 0;
 
+  const bestGenome = flattenGenome(state.best_genome);
+  const appliedGenome = applied ? flattenGenome(applied) : undefined;
+  // Health assessment runs against the **best** genome since that's the target
+  // the loop is converging on. If the applied genome differs, the same check
+  // could be run against it; for now the two coincide in practice.
+  const genomeHealth = await assessGenomeModels(bestGenome);
+
   return {
     available: true,
     baselineScore: safeNumber(state.baseline_score),
@@ -163,11 +176,12 @@ export async function getAutoResearchSnapshot(): Promise<AutoResearchSnapshot> {
     discarded,
     keptRate,
     lastExperimentAt: safeNumber(state.last_experiment_ts),
-    bestGenome: flattenGenome(state.best_genome),
+    bestGenome,
     recentTrials: recent,
     trend,
     restartCount,
-    appliedGenome: applied ? flattenGenome(applied) : undefined,
+    appliedGenome,
+    genomeHealth,
     source: "state.json",
   };
 }
