@@ -228,6 +228,15 @@ export type ModelEntry = {
   intel_last_probed_at?: number;
   // From probe-last-run.json
   last_probe_run_at?: number;
+  // From agent session jsonl files — richer error than the engine's classifier.
+  // The engine stores last_error as a class label ("timeout"/"rate_limit"/"other"),
+  // but the actual prompt-error in the session file contains the full reason
+  // ("LLM idle timeout (120s): no response from model" / "This operation was
+  // aborted" / "stream stalled after 90s"). When present, this is what to
+  // surface — way more diagnostic than "timeout".
+  session_last_error?: string;
+  session_last_error_at?: number;
+  session_last_error_provider?: string;
 };
 
 // Aggregate verdict from the probe runner's content judges (math / json / instruct / etc.).
@@ -315,6 +324,118 @@ async function tryReadJson(path: string): Promise<any | null> {
   }
 }
 
+// === Session-error scanner ============================================
+// The engine's `last_error` field only stores a high-level class label
+// ("timeout"/"rate_limit"/"other") because that's all the recorder passes
+// via `engine.py record <model> failure <kind>`. But the actual error
+// reason lives in agent session files as `openclaw:prompt-error` events
+// (timestamp, runId, provider, model, api, error). Scanning the tail of
+// each agent's recent sessions surfaces the richest possible reason per
+// model — exactly what the HUD watchlist needs to answer "WHY is this
+// model blocked?" at a glance.
+
+type SessionError = {
+  at: number;        // unix ms
+  error: string;     // truncated reason
+  provider: string;  // from the prompt-error.data
+};
+
+// Tail-read the last ~32KB of a jsonl session file and parse just the lines
+// we can. We DON'T need to deserialize the whole 50MB session — only the
+// recent entries where prompt-errors are likely. JSONL is line-oriented so
+// we drop the first (likely truncated) line after the seek.
+async function readTailLines(path: string, tailBytes: number): Promise<string[]> {
+  let stat: import("node:fs").Stats;
+  try { stat = await fs.stat(path); } catch { return []; }
+  const size = stat.size;
+  if (size === 0) return [];
+  const handle = await fs.open(path, "r");
+  try {
+    const start = size > tailBytes ? size - tailBytes : 0;
+    const buf = Buffer.alloc(Math.min(size, tailBytes));
+    await handle.read(buf, 0, buf.length, start);
+    const raw = buf.toString("utf8");
+    const lines = raw.split(/\r?\n/);
+    // Drop the first if we seeked past file start (likely mid-line).
+    return start > 0 ? lines.slice(1) : lines;
+  } finally {
+    await handle.close();
+  }
+}
+
+// Walk a small fixed set of agent session directories, find recent
+// prompt-error events, and aggregate by model id keeping the freshest
+// occurrence. Designed to cost <50ms per snapshot fetch.
+const AGENT_SESSION_DIRS = [
+  "main",       // eve
+  "prime",
+  "echo",
+  "vesper",
+];
+// Hub-relative under the WSL home. Resolved via the configured WSL user.
+function sessionDir(agent: string, wslUser: string): string {
+  // On Windows we read through wsl.localhost UNC; on Linux directly.
+  if (process.platform === "win32") {
+    return `\\\\wsl.localhost\\Ubuntu\\home\\${wslUser}\\.openclaw\\agents\\${agent}\\sessions`;
+  }
+  return `/home/${wslUser}/.openclaw/agents/${agent}/sessions`;
+}
+
+async function loadSessionErrors(wslUser: string): Promise<Map<string, SessionError>> {
+  const out = new Map<string, SessionError>();
+  const dirs = AGENT_SESSION_DIRS.map((a) => sessionDir(a, wslUser));
+  await Promise.all(dirs.map(async (dir) => {
+    let names: string[];
+    try {
+      names = await fs.readdir(dir);
+    } catch {
+      return;
+    }
+    // Take the 2 most-recently-modified .jsonl session files per agent
+    // (skip *.trajectory.jsonl — those are tool-call traces, no prompt-errors).
+    const candidates = names
+      .filter((n) => n.endsWith(".jsonl") && !n.includes("trajectory"));
+    const stats = await Promise.all(candidates.map(async (n) => {
+      try {
+        const s = await fs.stat(join(dir, n));
+        return { name: n, mtime: s.mtimeMs };
+      } catch {
+        return null;
+      }
+    }));
+    const recent = stats
+      .filter((s): s is { name: string; mtime: number } => s !== null)
+      .sort((a, b) => b.mtime - a.mtime)
+      .slice(0, 2);
+
+    for (const { name } of recent) {
+      const lines = await readTailLines(join(dir, name), 64 * 1024);
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        // Cheap filter before JSON.parse — every prompt-error line has the type tag.
+        if (!trimmed.includes('"openclaw:prompt-error"')) continue;
+        let obj: any;
+        try { obj = JSON.parse(trimmed); } catch { continue; }
+        if (obj?.type !== "custom" || obj.customType !== "openclaw:prompt-error") continue;
+        const data = obj.data || {};
+        const modelId = String(data.model || "").trim();
+        if (!modelId) continue;
+        const at = Number(data.timestamp) || (obj.timestamp ? Date.parse(obj.timestamp) : 0);
+        if (!Number.isFinite(at) || at <= 0) continue;
+        const error = String(data.error || data.message || "").replace(/\s+/g, " ").trim().slice(0, 200);
+        if (!error) continue;
+        const provider = String(data.provider || "");
+        const prev = out.get(modelId);
+        if (!prev || prev.at < at) {
+          out.set(modelId, { at, error, provider });
+        }
+      }
+    }
+  }));
+  return out;
+}
+
 export async function getEngineSnapshot(): Promise<EngineSnapshot> {
   const fallback: EngineSnapshot = {
     engineAvailable: false,
@@ -355,11 +476,15 @@ export async function getEngineSnapshot(): Promise<EngineSnapshot> {
     return fallback;
   }
 
-  // Read sibling files in parallel — all are optional.
-  const [registryDoc, intelDoc, probeDoc] = await Promise.all([
+  // Read sibling files + session-error tails in parallel — all are optional.
+  // sessionErrors gives us the rich "why did the model fail" reason from agent
+  // session jsonl files, which the engine's stored `last_error` truncates to a
+  // class label. The watchlist UI prefers session_last_error when available.
+  const [registryDoc, intelDoc, probeDoc, sessionErrors] = await Promise.all([
     tryReadJson(registryFile),
     tryReadJson(intelFile),
     tryReadJson(probeFile),
+    loadSessionErrors(cfg.wsl.user).catch(() => new Map<string, SessionError>()),
   ]);
 
   // Build a registry index keyed by model id. Strip base_url from providers — keeping only
@@ -532,6 +657,28 @@ export async function getEngineSnapshot(): Promise<EngineSnapshot> {
           }
         : {}),
       ...(probeRun ? { last_probe_run_at: probeRun } : {}),
+      // Session-error overlay — the engine stores a class label ("timeout"); the
+      // session captures the actual reason ("LLM idle timeout (120s): no response").
+      // Try the bare model_id first, then strip any provider prefix (for
+      // health-records keyed `<provider>/<model_ref>` shape).
+      ...(() => {
+        const direct = sessionErrors.get(modelId);
+        if (direct) return {
+          session_last_error: direct.error,
+          session_last_error_at: direct.at,
+          session_last_error_provider: direct.provider,
+        };
+        const inferred = inferProviderFromKey(modelId);
+        if (inferred) {
+          const stripped = sessionErrors.get(inferred.model_ref);
+          if (stripped) return {
+            session_last_error: stripped.error,
+            session_last_error_at: stripped.at,
+            session_last_error_provider: stripped.provider,
+          };
+        }
+        return {};
+      })(),
     });
   }
 

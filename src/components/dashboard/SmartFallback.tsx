@@ -64,6 +64,12 @@ type ModelEntry = {
   capability_evidence?: CapabilityEvidence[];
   intel_last_probed_at?: number;
   last_probe_run_at?: number;
+  // Richer error from agent session jsonl files. When set, surfaces the
+  // actual prompt-error reason ("LLM idle timeout (120s): no response")
+  // instead of the engine's class label ("timeout"). UI prefers this.
+  session_last_error?: string;
+  session_last_error_at?: number;
+  session_last_error_provider?: string;
 };
 
 type ProbeJudgeStat = {
@@ -620,6 +626,30 @@ export function SmartFallback() {
                         ⚠ {entry.last_error}
                       </p>
                     )}
+                    {/* Richer session error — when present, surface the actual
+                        prompt-error reason from agent session files. Shows beneath
+                        the engine's class label so operators see both "timeout"
+                        (the classification) and "LLM idle timeout (120s)" (the
+                        actual reason). Includes provider + age so it's clear
+                        which provider returned which error when. */}
+                    {entry.session_last_error && (() => {
+                      // session_last_error_at is unix ms; formatRelativeSeconds takes seconds.
+                      const ageLabel = entry.session_last_error_at
+                        ? formatRelativeSeconds(entry.session_last_error_at / 1000)
+                        : null;
+                      return (
+                        <p
+                          className="mt-0.5 truncate text-[8px] text-destructive/85"
+                          title={`Session error${entry.session_last_error_provider ? ` from ${entry.session_last_error_provider}` : ""}${ageLabel ? ` (${ageLabel})` : ""}: ${entry.session_last_error}`}
+                        >
+                          <span className="opacity-60">
+                            {entry.session_last_error_provider ? `${entry.session_last_error_provider} ` : ""}
+                            {ageLabel ? `${ageLabel}: ` : ""}
+                          </span>
+                          {entry.session_last_error}
+                        </p>
+                      );
+                    })()}
                   </div>
                   {(entry.circuit_state === "open" || entry.circuit_state === "half_open") && !decommissioned && (
                     <Button
